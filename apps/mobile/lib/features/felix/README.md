@@ -1,17 +1,21 @@
 # Felix field officer flow
 
-The frontend keeps Farmable's Home/Farm/Insights/Profile shell, photo carousel,
-cards, and action tiles. Home shows a short farm priority card; tap it for the
-action, reason, success check, source details, and Felix's correction controls.
+The frontend keeps Farmable's Home/Farm/Insights/Profile shell, wide photo hero,
+portrait carousel, cards, and action tiles. Home opens with the highest-priority
+farm in the original wide hero, followed by "Your farms" and four next-priority
+portrait cards with neighboring cards visible. Tap a farm for its action, reason,
+success check, source details, and Felix's correction controls.
 
 ## In-app flow
 
-1. Swipe Home's Farmable portrait carousel. Its order responds to mapped soil,
-   three-day weather, farmer answers, and Felix's changes. Tap the bell to see
-   in-app priority and check-in alerts.
-2. Open Farms for farm markers and attention areas on a bundled offline map of
-   Kasungu roads and waterways. Map data is © OpenStreetMap contributors (ODbL).
-   Tap a marker or list item for farm detail.
+1. Review the lead farm, then swipe Home's Farmable portrait carousel. Its order
+   responds to mapped soil, three-day weather, farmer answers, and Felix's
+   changes. Today's plan and a map preview sit below. Tap the bell for in-app
+   priority and check-in alerts.
+2. Open Farms for a full-page bundled offline map of Kasungu roads and waterways.
+   Priority areas and farm pins sit on top. Tap a pin to preview the farm action,
+   or open the searchable farm list. Map data is © OpenStreetMap contributors
+   (ODbL).
 3. Open Activity > Farmer check-in, choose a farm, and answer the short USSD-style
    numbered questions. The questions branch from the farm's current drainage,
    heat, or general crop flag. The final screen confirms that the response

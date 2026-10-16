@@ -12,6 +12,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../app/theme/app_theme.dart';
 import '../../app/theme/tokens.g.dart';
 import '../../core/ui/badges.dart';
+import '../../core/ui/buttons.dart';
 import '../../core/ui/crop_imagery.dart';
 import '../../core/ui/layout.dart';
 import '../../core/utils/dates.dart';
@@ -231,6 +232,7 @@ class _WorkspaceState extends State<_Workspace> {
   int _farmIndex = 0;
   String _filter = 'All';
   String _search = '';
+  String? _selectedMapFarmId;
   final _events = <String>[];
   final _alerts = <String>[
     'Kasungu forecast: review farms exposed to heat and low rainfall.',
@@ -666,15 +668,16 @@ class _WorkspaceState extends State<_Workspace> {
     destination: NavDestination.values[_tab],
     onSelect: (destination) => setState(() => _tab = destination.index),
     onAssistantPressed: () => _message(_ranked.first.why),
-    body: SafeArea(
-      bottom: false,
-      child: switch (_tab) {
-        0 => _home(),
-        1 => _farmsPage(),
-        2 => _planPage(),
-        _ => _activityPage(),
-      },
-    ),
+    body: _tab == 1
+        ? _farmsPage()
+        : SafeArea(
+            bottom: false,
+            child: switch (_tab) {
+              0 => _home(),
+              2 => _planPage(),
+              _ => _activityPage(),
+            },
+          ),
   );
 
   EdgeInsets get _pagePadding => const EdgeInsets.fromLTRB(
@@ -686,38 +689,65 @@ class _WorkspaceState extends State<_Workspace> {
 
   Widget _home() {
     final ranked = _ranked;
-    final selected = ranked[_farmIndex.clamp(0, ranked.length - 1)];
+    final carouselFarms = ranked.skip(1).take(4).toList();
+    final selected = carouselFarms.isEmpty
+        ? ranked.first
+        : carouselFarms[_farmIndex.clamp(0, carouselFarms.length - 1)];
+    final visits = ranked
+        .where(
+          (farm) =>
+              !farm.completed &&
+              farm.override != 'Call instead' &&
+              farm.score >= 55,
+        )
+        .take(3)
+        .toList();
     return ListView(
-      padding: _pagePadding,
+      padding: const EdgeInsets.only(
+        top: AlmanacDimens.sp4,
+        bottom: BottomNavIsland.bottomInset,
+      ),
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Hello, Felix',
-                    style: Theme.of(context).textTheme.headlineLarge,
-                  ),
-                  Text(
-                    greetingDate(DateTime.now()),
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
+        _homeInset(
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Hello, Felix',
+                      style: Theme.of(context).textTheme.headlineLarge,
+                    ),
+                    Text(
+                      greetingDate(DateTime.now()),
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
               ),
-            ),
-            IconButton(
-              tooltip: 'Notifications',
-              onPressed: _openAlerts,
-              icon: Badge(
-                label: Text('${_alerts.length}'),
-                child: const Icon(LucideIcons.bell),
+              IconButton(
+                tooltip: 'Notifications',
+                onPressed: _openAlerts,
+                icon: Badge(
+                  label: Text('${_alerts.length}'),
+                  child: const Icon(LucideIcons.bell),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
         const SizedBox(height: AlmanacDimens.sp5),
+        _homeInset(_focusHero(ranked.first)),
+        const SizedBox(height: AlmanacDimens.sp5),
+        _homeInset(
+          SectionHeader(
+            title: 'Your farms',
+            subtitle: 'Next farms to check',
+            actionLabel: 'See all',
+            onAction: _openFarmList,
+          ),
+        ),
         LayoutBuilder(
           builder: (context, constraints) {
             final pageWidth = constraints.maxWidth * .72;
@@ -732,7 +762,7 @@ class _WorkspaceState extends State<_Workspace> {
               child: PageView.builder(
                 controller: _carousel,
                 clipBehavior: Clip.none,
-                itemCount: ranked.length,
+                itemCount: carouselFarms.length,
                 onPageChanged: (index) => setState(() => _farmIndex = index),
                 itemBuilder: (context, index) => AnimatedBuilder(
                   animation: _carousel,
@@ -757,7 +787,7 @@ class _WorkspaceState extends State<_Workspace> {
                         padding: const EdgeInsets.symmetric(
                           horizontal: AlmanacDimens.sp2,
                         ),
-                        child: _hero(ranked[index], index + 1),
+                        child: _hero(carouselFarms[index], index + 2),
                       ),
                     ),
                   ),
@@ -767,54 +797,192 @@ class _WorkspaceState extends State<_Workspace> {
           },
         ),
         const SizedBox(height: 10),
-        SectionHeader(title: 'Farm health', subtitle: selected.name),
-        _panel(
-          child: ListTile(
-            contentPadding: EdgeInsets.zero,
-            title: Text(selected.status),
-            subtitle: Text(selected.report ?? 'No farmer response yet'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _openFarm(selected),
+        _homeInset(
+          Row(
+            children: [
+              Icon(
+                LucideIcons.sprout,
+                size: 18,
+                color: _riskColor(selected.score),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '${selected.status} · ${selected.action}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ),
+              TextButton(
+                onPressed: () => _openFarm(selected),
+                child: const Text('Details'),
+              ),
+            ],
           ),
         ),
-        const SectionHeader(title: 'Field actions'),
-        QuickActions(
-          actions: [
-            QuickAction(
-              icon: LucideIcons.map,
-              label: 'Farm map',
-              onTap: () => setState(() => _tab = 1),
-            ),
-            QuickAction(
-              icon: LucideIcons.route,
-              label: 'Plan visits',
-              onTap: () => setState(() => _tab = 2),
-            ),
-            QuickAction(
-              icon: LucideIcons.notebookPen,
-              label: 'Field record',
-              onTap: () => setState(() => _tab = 3),
-            ),
-          ],
+        const SizedBox(height: AlmanacDimens.sp5),
+        _homeInset(
+          SectionHeader(
+            title: "Today's plan",
+            subtitle: '${visits.length} suggested visits',
+            actionLabel: 'Open plan',
+            onAction: () => setState(() => _tab = 2),
+          ),
         ),
-        const SizedBox(height: 14),
-        SectionHeader(
-          title: 'Next action',
-          actionLabel: 'Details',
-          onAction: () => _openFarm(selected),
+        for (final farm in visits) ...[
+          _homeInset(
+            _panel(
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: CircleAvatar(
+                  backgroundColor: _riskColor(farm.score)
+                      .withValues(alpha: .13),
+                  child: Icon(
+                    LucideIcons.mapPin,
+                    color: _riskColor(farm.score),
+                  ),
+                ),
+                title: Text(farm.name),
+                subtitle: Text(farm.action),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => _openFarm(farm),
+              ),
+            ),
+          ),
+          const SizedBox(height: 9),
+        ],
+        const SizedBox(height: AlmanacDimens.sp3),
+        _homeInset(
+          SectionHeader(
+            title: 'Farm map',
+            subtitle: 'Kasungu hotspots',
+            actionLabel: 'Open map',
+            onAction: () => setState(() => _tab = 1),
+          ),
         ),
-        _panel(
-          child: ListTile(
-            contentPadding: EdgeInsets.zero,
-            title: Text(selected.action),
-            subtitle: Text(selected.name),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _openFarm(selected),
+        _homeInset(
+          GestureDetector(
+            onTap: () => setState(() => _tab = 1),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(AlmanacDimens.r2xl),
+              child: SizedBox(
+                height: 205,
+                child: Stack(
+                  children: [
+                    IgnorePointer(child: _mapCanvas()),
+                    const Positioned(
+                      top: 12,
+                      left: 12,
+                      child: OfflineBadge(label: 'Offline map'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: AlmanacDimens.sp5),
+        _homeInset(const SectionHeader(title: 'Field actions')),
+        _homeInset(
+          QuickActions(
+            actions: [
+              QuickAction(
+                icon: LucideIcons.map,
+                label: 'Farm map',
+                onTap: () => setState(() => _tab = 1),
+              ),
+              QuickAction(
+                icon: LucideIcons.route,
+                label: 'Plan visits',
+                onTap: () => setState(() => _tab = 2),
+              ),
+              QuickAction(
+                icon: LucideIcons.notebookPen,
+                label: 'Field record',
+                onTap: () => setState(() => _tab = 3),
+              ),
+            ],
           ),
         ),
       ],
     );
   }
+
+  Widget _homeInset(Widget child) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: AlmanacDimens.gutter),
+    child: child,
+  );
+
+  Widget _focusHero(_Farm farm) => GestureDetector(
+    onTap: () => _openFarm(farm),
+    child: ClipRRect(
+      borderRadius: BorderRadius.circular(AlmanacDimens.r2xl),
+      child: AspectRatio(
+        aspectRatio: 16 / 11,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            CropImagery(
+              scene: CropScene.farm,
+              seed: farm.name,
+              demoPhotography: true,
+            ),
+            const ImageryScrim(),
+            Positioned(
+              top: AlmanacDimens.sp4,
+              left: AlmanacDimens.sp4,
+              right: AlmanacDimens.sp4,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  ScrimBadge(icon: LucideIcons.sprout, text: farm.status),
+                  IconOnlyButton(
+                    icon: LucideIcons.map,
+                    semanticLabel: 'Open farm map',
+                    onImagery: true,
+                    onPressed: () => setState(() {
+                      _selectedMapFarmId = farm.id;
+                      _tab = 1;
+                    }),
+                  ),
+                ],
+              ),
+            ),
+            Positioned(
+              left: AlmanacDimens.sp5,
+              right: AlmanacDimens.sp5,
+              bottom: AlmanacDimens.sp5,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    farm.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.headlineSmall
+                        ?.copyWith(color: Colors.white),
+                  ),
+                  Text(
+                    'Kasungu · ${farm.crop}',
+                    style: Theme.of(context).textTheme.bodySmall
+                        ?.copyWith(color: const Color(0xFFE4E1D8)),
+                  ),
+                  const SizedBox(height: AlmanacDimens.sp2),
+                  Text(
+                    farm.action,
+                    style: Theme.of(context).textTheme.titleSmall
+                        ?.copyWith(color: Colors.white),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 
   Widget _hero(_Farm farm, int rank) {
     final colors = context.semantic;
@@ -939,7 +1107,186 @@ class _WorkspaceState extends State<_Workspace> {
     );
   }
 
+  Widget _mapCanvas({ValueChanged<_Farm>? onSelect}) => FlutterMap(
+    options: MapOptions(
+      backgroundColor: const Color(0xFFE5E9DB),
+      initialCenter: const LatLng(-13.037, 33.490),
+      initialZoom: 14.7,
+      interactionOptions: const InteractionOptions(
+        flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
+      ),
+    ),
+    children: [
+      PolylineLayer(polylines: _offlineRivers),
+      PolylineLayer(polylines: _offlineRoads),
+      CircleLayer(
+        circles: [
+          for (final farm in _farms.where((farm) => farm.score >= 55))
+            CircleMarker(
+              point: farm.point,
+              radius: 180,
+              useRadiusInMeter: true,
+              color: _riskColor(farm.score).withValues(alpha: .13),
+              borderColor: _riskColor(farm.score).withValues(alpha: .4),
+              borderStrokeWidth: 1,
+            ),
+        ],
+      ),
+      MarkerLayer(
+        markers: [
+          for (final farm in _farms)
+            Marker(
+              point: farm.point,
+              width: 48,
+              height: 48,
+              child: IconButton(
+                tooltip: '${farm.name} · ${farm.status}',
+                onPressed: () => onSelect?.call(farm),
+                icon: Icon(
+                  Icons.location_on,
+                  color: _riskColor(farm.score),
+                  size: 35,
+                ),
+              ),
+            ),
+        ],
+      ),
+    ],
+  );
+
   Widget _farmsPage() {
+    final ranked = _ranked;
+    final selected = ranked.firstWhere(
+      (farm) => farm.id == _selectedMapFarmId,
+      orElse: () => ranked.first,
+    );
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        _mapCanvas(
+          onSelect: (farm) => setState(() => _selectedMapFarmId = farm.id),
+        ),
+        SafeArea(
+          bottom: false,
+          child: Align(
+            alignment: Alignment.topCenter,
+            child: Padding(
+              padding: const EdgeInsets.all(AlmanacDimens.gutter),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _panel(
+                      child: Row(
+                        children: [
+                          const Icon(LucideIcons.mapPin, size: 20),
+                          const SizedBox(width: 8),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                'Kasungu',
+                                style: Theme.of(context).textTheme.titleSmall,
+                              ),
+                              Text(
+                                '${_farms.length} farms · priority hotspots',
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  IconButton.filledTonal(
+                    tooltip: 'Find a farm',
+                    onPressed: _openFarmList,
+                    icon: const Icon(LucideIcons.list),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          left: AlmanacDimens.gutter,
+          right: AlmanacDimens.gutter,
+          bottom: BottomNavIsland.bottomInset + AlmanacDimens.sp3,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Align(
+                alignment: Alignment.centerLeft,
+                child: const OfflineBadge(label: 'Offline map'),
+              ),
+              const SizedBox(height: 10),
+              _panel(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            selected.name,
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                        ),
+                        Text(
+                          selected.status,
+                          style: Theme.of(context).textTheme.labelMedium
+                              ?.copyWith(color: _riskColor(selected.score)),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      '${selected.crop} · ${selected.action}',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      selected.why,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton(
+                        onPressed: () => _openFarm(selected),
+                        child: const Text('View action'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '© OpenStreetMap contributors · saved Kasungu map',
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _openFarmList() => showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    showDragHandle: true,
+    builder: (context) => StatefulBuilder(
+      builder: (context, refreshSheet) => FractionallySizedBox(
+        heightFactor: .88,
+        child: _farmListPage(refreshSheet),
+      ),
+    ),
+  );
+
+  Widget _farmListPage(StateSetter refreshSheet) {
     final farms = _ranked.where((farm) {
       final matchText = '${farm.name} ${farm.id} ${farm.crop}'
           .toLowerCase()
@@ -1056,7 +1403,10 @@ class _WorkspaceState extends State<_Workspace> {
         ),
         const SizedBox(height: 16),
         TextField(
-          onChanged: (value) => setState(() => _search = value),
+          onChanged: (value) {
+            setState(() => _search = value);
+            refreshSheet(() {});
+          },
           decoration: InputDecoration(
             hintText: 'Find a farm',
             prefixIcon: const Icon(Icons.search),
@@ -1075,7 +1425,10 @@ class _WorkspaceState extends State<_Workspace> {
               ChoiceChip(
                 label: Text(value),
                 selected: _filter == value,
-                onSelected: (_) => setState(() => _filter = value),
+                onSelected: (_) {
+                  setState(() => _filter = value);
+                  refreshSheet(() {});
+                },
               ),
           ],
         ),
