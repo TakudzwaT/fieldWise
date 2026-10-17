@@ -48,7 +48,7 @@ describe("http", () => {
 
   it("runs a demo scenario and the farmer answers through /inbound", async () => {
     const call = client();
-    const scenario = await call("POST", "/demo/scenario", { weather: "wet", farmer_id: "F014" });
+    const scenario = await call("POST", "/demo/scenario", { weather: "wet", farmer_id: "F056" });
     expect(scenario.body.results.filter((r: { alert: string | null }) => r.alert).map((r: { disease: string }) => r.disease)).toEqual([
       "late_blight",
       "maize_leaf_blights",
@@ -56,18 +56,18 @@ describe("http", () => {
       "clubroot",
     ]);
 
-    const list = await call("POST", "/inbound", { phone: "+2650000000014", text: "2" });
+    const list = await call("POST", "/inbound", { phone: "+2650000000056", text: "2" });
     expect(list.body.replies[0]).toBe("Kodi mukufuna kutiuza za mbewu iti?\n1 Matimati\n2 Chimanga\n3 Nyemba\n4 Kabichi");
-    const first = await call("POST", "/inbound", { phone: "+2650000000014", text: "2", screen: "pick" });
+    const first = await call("POST", "/inbound", { phone: "+2650000000056", text: "2", screen: "pick" });
     expect(first.body.replies[0]).toBe("Chimanga chanu · 1 mwa 8\nKodi masamba apansi ali ndi mizere yaitali yotsatira utali wa tsamba?\n1 Inde\n2 Ayi");
 
-    const { body } = await call("GET", "/farmers/F014");
+    const { body } = await call("GET", "/farmers/F056");
     expect(body.flags.find((f: { disease: string }) => f.disease === "maize_leaf_blights")).toMatchObject({
       source: "scenario",
       session: { status: "active", step: 0 },
     });
     expect(body.flags.find((f: { disease: string }) => f.disease === "clubroot")).toMatchObject({ session: { status: "offered" } });
-    const messages = await call("GET", "/farmers/F014/messages");
+    const messages = await call("GET", "/farmers/F056/messages");
     expect(messages.body.messages.map((m: { direction: string }) => m.direction)).toEqual(["out", "out", "in", "out", "in", "out"]);
   });
 

@@ -4,25 +4,34 @@ Sits between the weather API (`apps/api`) and the farmers. When the forecast
 newly favours a crop disease, the farmer is alerted, picks which at-risk plant
 to report on, and answers a short yes/no questionnaire about it, then may pick
 another. Their answers are scored into an outcome for Felix, the extension
-officer.
+officer, who can reply to farmers and see who asked him to call.
 
-> **Status:** step 4 of 5. Everything runs locally: alerts, questionnaires,
-> scoring, the D1 database, the web phone simulator, Felix's live dashboard,
-> and WhatsApp (tested against simulated Meta calls). Deployment comes next;
-> WhatsApp needs it, because Meta must reach the Worker over HTTPS.
+Farmers answer on whatever phone they have. About 9 in 10 around Kasungu have
+a basic keypad phone: they get alerts by **SMS** and answer by **USSD**
+(dialling `*384*123#`). The 1 in 10 with a smartphone use **WhatsApp**.
+
+> **Status:** step 5 of 5. Alerts, questionnaires, scoring, the D1 database,
+> USSD and SMS (tested against simulated Africa's Talking calls), WhatsApp
+> (tested against simulated Meta calls), officer logins, Felix's replies, the
+> phone simulators and Felix's live dashboard.
 
 ## The demo
 
-Open `/demo` (or `/`): the farmer's phone, Felix's phone, and Felix's
-dashboard, side by side (a screen at least 1300 pixels wide fits all three).
+Open `/demo` (or `/`): the farmer's phone (a keypad phone for USSD farmers, a
+WhatsApp chat for John Banda), Felix's phone, and Felix's dashboard, side by side (a screen at least 1300 pixels wide fits all three).
 The pages ask for the admin token once and keep it in that browser. The top
 bar has **Wet spell**, **Dry spell** and **Reset** for one farm or all.
 
 1. **Wet spell** (dashboard, demo controls) runs a made-up wet spell through
    the real rules. It puts all four crops at risk (late blight, maize leaf
    blights, bean leaf diseases, clubroot), and every farm gets one alert.
-2. On the phone, pick a language, then the plant to report on, then answer
-   its questions by tapping Yes/No or typing `1`, `2`, `yes`, `inde`. After
+2. On a keypad phone, the alert arrives as an SMS. Press **Dial *384*123#**,
+   then type numbers on the keypad and press **OK**: pick a language, the
+   plant to report on, then answer its questions. `0` opens the menu: report
+   a problem, read Felix's messages, ask Felix to call, change language. See
+   [docs/ussd-setup.md](docs/ussd-setup.md).
+   On John Banda's WhatsApp chat, pick a language, then the plant to report
+   on, then answer its questions by tapping Yes/No or typing `1`, `2`, `yes`, `inde`. After
    each plant the farmer is asked whether to report on another; **No** ends
    it, and the plants not picked are left off Felix's list.
    The phone is drawn as a WhatsApp chat: the alert drops in as a
@@ -42,8 +51,14 @@ bar has **Wet spell**, **Dry spell** and **Reset** for one farm or all.
    stay but forget their language, so the next run starts with the language
    question.
 
-`/sim`, `/officer` (Felix's phone) and `/dashboard` also work on their own;
-`/sim?farmer=F056` opens one farmer.
+5. On Felix's phone, open a farm and tap **Message <name>** for a ready-made
+   reply ("Visiting today", "Remove affected plants", ...) or his own words.
+   It goes by SMS to keypad phones and by WhatsApp to smartphones. The
+   dashboard's **Message all farmers** sends one to everyone. **Call back**
+   lists farmers who asked Felix to call, until he marks them done.
+
+`/phone` (keypad phone), `/sim` (WhatsApp), `/officer` (Felix's phone) and
+`/dashboard` also work on their own; `/phone?farmer=F014` opens one farmer.
 
 ## How it decides
 
@@ -156,28 +171,44 @@ number id, WhatsApp farmers' messages are logged as failed and nothing is sent.
 
 ## Routes
 
-Every route except `/health` needs `Authorization: Bearer <ADMIN_TOKEN>`,
-because the data includes farmers' names and phone numbers. With no token
-configured, every request is refused.
+Every route except `/health` needs a token, because the data includes
+farmers' names and phone numbers: `Authorization: Bearer <ADMIN_TOKEN>` for
+everything, or an **officer token** for that officer's own farmers. With no
+token configured, every request is refused.
+
+An officer token (`fw_...`) is for the Felix app. The admin makes one with
+`POST /officers/:id/token`; it is shown once, and only its hash is kept. An
+officer can read their farmers, flags, priority list and summary, message
+their farmers and close call-backs. Everything else (the demo, checks, new
+farmers, other officers) is refused with 403. Felix is officer `OFF01`.
 
 | Route | What it does |
 |---|---|
 | `GET /health` | `{ "status": "ok" }` |
 | `GET /farmers` | All farmers |
-| `POST /farmers` | Register one: `name`, `phone`, `latitude`, `longitude`, and optionally `farm_name`, `lang` (`en`/`ny`) and `channel` (`whatsapp`, the default, or `sim`). A Malawi number starting 0 becomes +265. |
+| `GET /me` | Who the token belongs to: `{"role": "admin"}` or the officer |
+| `POST /farmers` | Register one: `name`, `phone`, `latitude`, `longitude`, and optionally `farm_name`, `lang` (`en`/`ny`), `channel` (`whatsapp`, the default, `ussd`, or `sim`) and `officer_id`. A Malawi number starting 0 becomes +265. Admin only. |
 | `GET /farmers/:id` | A farmer, with their flags, sessions and reports |
-| `GET /farmers/:id/messages` | Everything sent to and from them |
+| `GET /farmers/:id/messages` | Everything sent to and from them. `kind` is `sms`, `ussd` (a screen or key press) or null (chat); `officer_id` marks an officer's message. |
+| `POST /farmers/:id/messages` | The officer messages the farmer: `text` (up to 300 characters) or `advice` (a ready-made reply's id). By SMS or WhatsApp, in the farmer's language. |
 | `GET /flags` | Every flag, newest first, with its session and report |
 | `POST /flags` | Raise one by hand: `farmer_id`, `disease`. It joins the farmer's open round, or opens one. |
 | `POST /checks/run` | Run the forecast checks now, instead of waiting for the cron |
 | `POST /demo/scenario` | Put a made-up `"wet"` or `"dry"` spell through the same rules, for every farmer or one `farmer_id`. Wet puts all four crops at risk; dry clears them, so the next wet spell alerts again. Flags raised this way are marked `source: "scenario"`. |
 | `POST /inbound` | A farmer's message: `phone`, `text`, and for a button tap its `screen`. Returns the replies sent back. Used by the simulator; WhatsApp feeds the same handler. |
 | `POST /sweep` | Run reminders, no-response marks and re-asks now |
-| `GET /felix/priority` | Felix's list: one line per flagged farm, most urgent first, in the document's format (`text`) and as fields. `?days=` sets the window (1-90, default 14). |
-| `GET /felix/summary` | Totals for the same window: farms flagged, response rate, outcomes, wrong-flag rate, flags by disease, and what the answers point to |
+| `GET /felix/priority` | Felix's list: one line per flagged farm, most urgent first, in the document's format (`text`) and as fields, plus open `callbacks`. `?days=` sets the window (1-90, default 14). |
+| `GET /felix/summary` | Totals for the same window: farms flagged, response rate, outcomes, wrong-flag rate, farmer reports, flags by disease, and what the answers point to. A farmer's own report isn't counted in the response rate. |
+| `GET /felix/advice` | The ready-made replies, with their English and Chichewa text |
+| `POST /felix/broadcast` | Message every one of the officer's farmers (at most 40), or the listed `farmer_ids`: `text` or `advice` |
+| `GET /felix/callbacks` | Open "ask Felix to call me" requests, oldest first |
+| `POST /felix/callbacks/:id/done` | Mark one called |
+| `GET /officers`, `POST /officers` | List officers, or add one (`name`, optionally `phone`, `area`). Admin only. |
+| `POST /officers/:id/token` | Make a new login token for an officer; the old one stops working. Shown once. Admin only. |
 | `POST /demo/reset` | Delete every flag, session, track and message. Needs `{"confirm": "reset"}`. |
-| `GET /demo`, `/dashboard`, `/sim`, `/officer` | The demo pages. They hold no data, so they need no token to load. |
+| `GET /demo`, `/dashboard`, `/phone`, `/sim`, `/officer` | The demo pages. They hold no data, so they need no token to load. |
 | `GET /whatsapp`, `POST /whatsapp` | Meta's webhook. Checked by verify token and signature, not the admin token. |
+| `POST /ussd` | Africa's Talking's USSD callback (form fields `sessionId`, `phoneNumber`, `text`). Needs `?key=<USSD_KEY>`, or the admin token (the keypad phone page). Answers `CON ...` or `END ...` as plain text. |
 
 ### Felix's priority order
 
@@ -198,8 +229,9 @@ under `also`. Plants the farmer chose not to report on are left off.
 `migrations/0002_seed.sql` adds the eight Felix app farms, at the same points.
 The names are invented. Each is checked for all four crops (`0006_rounds.sql`
 dropped the single crop per farmer). Their phone numbers start `+265 0`,
-which no real number does, and their channel is `sim`, so nothing sent to
-them leaves FieldWise.
+which no real number does, and they are marked `demo`, so nothing sent to
+them leaves FieldWise. `0007_ussd.sql` puts seven of them on USSD; John
+Banda (F056) stays on the simulated WhatsApp chat. All eight are Felix's.
 
 ## Free plan limits
 
@@ -264,12 +296,15 @@ curl "http://localhost:8787/__scheduled?cron=15+*+*+*+*"
 | `src/questionnaires.ts` | The six questionnaires and their rules |
 | `src/scoring.ts` | Answers to an outcome for Felix |
 | `src/messages.ts` | Alert, reminder, "which plant?", "another plant?" and other farmer-facing text |
-| `src/outbox.ts` | Logs and delivers outgoing messages |
+| `src/outbox.ts` | Logs and delivers outgoing messages; one SMS per batch for USSD farmers |
 | `src/whatsapp.ts` | WhatsApp webhook, delivery, joining and the template fallback |
+| `src/ussd.ts` | Africa's Talking's USSD callback: questions, the menu, the 182-character screen |
+| `src/sms.ts` | SMS through Africa's Talking |
 | `src/phone.ts` | Phone number normalising |
 | `src/store.ts` | D1 reads and writes |
-| `migrations/` | Schema, demo farmers, WhatsApp delivery status, session versions, question screens, rounds |
+| `migrations/` | Schema, demo farmers, WhatsApp delivery status, session versions, question screens, rounds, USSD and officers |
 | `docs/whatsapp-setup.md` | Setting up Meta's WhatsApp test number |
+| `docs/ussd-setup.md` | USSD and SMS: the demo, the Africa's Talking sandbox, going live |
 
 `src/checks.ts` imports the decision tree from `../api/src/assess.ts`, so the
 scenario uses exactly the weather API's rules.

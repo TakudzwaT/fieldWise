@@ -120,6 +120,8 @@ export interface Summary {
   flagged_farms: number;
   flags: number;
   scenario_flags: number;
+  /** Problems farmers reported themselves, from the USSD menu. */
+  farmer_reports: number;
   states: Record<State, number>;
   /** Answered out of those asked; null before anyone has been asked. */
   response_rate: number | null;
@@ -163,15 +165,19 @@ export function summary(rows: FlagRow[], farmers: number): Summary {
   }
 
   // Every listed flag was asked: its plant was on the farmer's list (or, for a
-  // re-check, its questions were sent). Plants the farmer said no to are not listed.
-  const asked = live.length;
+  // re-check, its questions were sent). Plants the farmer said no to are not
+  // listed, and a farmer's own report wasn't asked for, so it doesn't count.
+  const askedRows = live.filter((r) => r.flag.source !== "farmer");
+  const asked = askedRows.length;
+  const answeredAsked = askedRows.map(entry).filter((e) => e.state === "answered").length;
   return {
     farmers,
     flagged_farms: new Set(live.map((r) => r.farmer.id)).size,
     flags: live.length,
     scenario_flags: live.filter((r) => r.flag.source === "scenario").length,
     states,
-    response_rate: asked ? round(states.answered / asked) : null,
+    response_rate: asked ? round(answeredAsked / asked) : null,
+    farmer_reports: live.length - asked,
     outcomes,
     urgent: entries.filter((e) => e.rank === "go_now").length,
     wrong_flag_rate: states.answered ? round(outcomes.wrong_flag / states.answered) : null,

@@ -427,6 +427,11 @@ function send(text, screen) {
 function choose(id) {
   current = farmers.filter(function (f) { return f.id === id; })[0] || farmers[0];
   if (!current) return;
+  // Farmers without a smartphone get the keypad phone.
+  if (current.channel === "ussd") {
+    location.replace("/phone?farmer=" + encodeURIComponent(current.id) + "#token=" + encodeURIComponent(token));
+    return;
+  }
   store("fieldwise-sim-farmer", current.id);
   select.value = current.id;
   lastKey = null; lastMaxId = 0; firstDraw = true; seenIds = {};
@@ -448,7 +453,309 @@ gate(function () {
   api("/farmers").then(function (d) {
     farmers = d.farmers;
     farmers.forEach(function (f) {
-      append(select, el("option", { value: f.id }, f.name + (f.farm_name ? " · " + f.farm_name : "")));
+      append(select, el("option", { value: f.id }, f.name + " · " + (f.channel === "ussd" ? "keypad phone" : "WhatsApp")));
+    });
+    choose(new URLSearchParams(location.search).get("farmer") || store("fieldwise-sim-farmer"));
+    setInterval(refresh, 1500);
+  }).catch(function (e) { toast(e.message); });
+});
+`,
+);
+
+// A basic keypad phone, for the 9 in 10 farmers without a smartphone. Dial
+// the FieldWise code to answer questions or use the menu (USSD, through the
+// same /ussd route Africa's Talking calls); alerts and Felix's messages
+// arrive as SMS. The screen holds what a real USSD screen does, and a session
+// left idle times out, as networks do.
+export const featurePhonePage = page(
+  "FieldWise Feature Phone",
+  `
+body { min-height: 100vh; display: grid; place-items: start center; padding: 16px; }
+.wrap { width: min(340px, 100%); display: grid; gap: 12px; }
+.pick { display: flex; gap: 8px; align-items: center; }
+.pick select { flex: 1; font-size: 14px; }
+.handset { position: relative; background: linear-gradient(160deg, #3A3E45, #1E2024 60%); border-radius: 44px 44px 56px 56px; padding: 26px 22px 30px; box-shadow: 0 0 0 2px #15171A inset, 0 1px 0 3px rgba(255,255,255,.04) inset, 0 30px 60px rgba(0,0,0,.28); }
+.handset.buzz { animation: buzz .5s ease-in-out; }
+@keyframes buzz { 0%,100% { transform: none; } 20% { transform: translateX(-3px) rotate(-.6deg); } 40% { transform: translateX(3px) rotate(.6deg); } 60% { transform: translateX(-2px); } 80% { transform: translateX(2px); } }
+.speaker { width: 70px; height: 6px; border-radius: 3px; background: #0E0F11; margin: 0 auto 10px; box-shadow: 0 1px 0 rgba(255,255,255,.06); }
+.maker { text-align: center; color: #9AA0A8; font-size: 11px; letter-spacing: .3em; font-weight: 700; margin-bottom: 10px; }
+.lcd { background: #EEF2E6; color: #16200F; border-radius: 10px; height: 300px; display: flex; flex-direction: column; box-shadow: 0 0 0 4px #0B0C0E, 0 0 0 5px #4A4F57, inset 0 2px 8px rgba(0,0,0,.18); overflow: hidden; font: 500 14.5px/1.32 var(--font); }
+.lcd .bar { display: flex; align-items: center; gap: 6px; padding: 5px 9px 4px; font-size: 11.5px; font-weight: 700; border-bottom: 1px solid rgba(22,32,15,.18); }
+.lcd .bar .op { flex: 1; text-align: center; }
+.lcd .bar svg { display: block; fill: currentColor; }
+.lcd .view { flex: 1; overflow-y: auto; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.lcd .soft { display: flex; justify-content: space-between; padding: 4px 10px 6px; font-weight: 700; font-size: 13px; border-top: 1px solid rgba(22,32,15,.18); min-height: 27px; }
+.lcd .soft span:nth-child(2) { opacity: .7; }
+.idle { height: 100%; display: grid; place-items: center; text-align: center; gap: 4px; align-content: center; }
+.idle .clock { font-size: 40px; font-weight: 300; letter-spacing: -.02em; line-height: 1; }
+.idle .date { font-size: 13px; opacity: .75; }
+.idle .env { margin-top: 14px; display: inline-flex; gap: 6px; align-items: center; font-weight: 700; background: #16200F; color: #EEF2E6; padding: 4px 10px; border-radius: 6px; }
+.dialed { font-size: 26px; font-weight: 600; text-align: right; word-break: break-all; padding-top: 30px; letter-spacing: .02em; }
+.title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; opacity: .65; margin-bottom: 4px; }
+.reply { margin-top: 8px; border: 1.5px solid #16200F; border-radius: 4px; padding: 3px 6px; min-height: 26px; font-weight: 700; }
+.reply::after { content: "|"; animation: blink 1s steps(1) infinite; margin-left: 1px; font-weight: 400; }
+@keyframes blink { 50% { opacity: 0; } }
+.wait { height: 100%; display: grid; place-items: center; text-align: center; }
+.wait i { display: block; width: 26px; height: 26px; margin: 0 auto 8px; border: 3px solid rgba(22,32,15,.2); border-top-color: #16200F; border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.sms-meta { font-size: 11.5px; opacity: .7; margin-bottom: 4px; }
+.count { font-size: 12px; opacity: .6; margin-left: auto; }
+.keys { margin-top: 18px; display: grid; gap: 9px; }
+.nav { display: grid; grid-template-columns: 1fr 1fr 1.1fr 1fr 1fr; gap: 8px; align-items: center; }
+.key { border: 0; border-radius: 14px; background: linear-gradient(#4A4F57, #33373D); color: #EDEFF2; box-shadow: 0 2px 0 #121316, 0 0 0 1px rgba(255,255,255,.05) inset; height: 42px; display: grid; place-items: center; font-weight: 700; font-size: 18px; line-height: 1; padding: 0; user-select: none; }
+.key:active, .key.down { transform: translateY(2px); box-shadow: 0 0 0 #121316, 0 0 0 1px rgba(255,255,255,.05) inset; filter: brightness(1.15); }
+.key small { display: block; font-size: 9px; letter-spacing: .12em; font-weight: 600; opacity: .7; margin-top: 2px; }
+.key.soft-k { height: 30px; font-size: 0; }
+.key.soft-k::before { content: ""; width: 22px; height: 3px; border-radius: 2px; background: #C8CCD2; }
+.key.ok { border-radius: 50%; height: 50px; width: 50px; justify-self: center; font-size: 13px; }
+.key.call { background: linear-gradient(#2E8B4E, #1F6B3A); }
+.key.end { background: linear-gradient(#B4392E, #8C2A22); }
+.key svg { width: 20px; height: 20px; fill: currentColor; }
+.pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; }
+.pad .key { height: 46px; display: block; padding-top: 7px; }
+.quick { display: flex; gap: 8px; }
+.quick .btn { flex: 1; }
+.note { font-size: 12px; color: var(--muted); text-align: center; margin: 0; }
+`,
+  `<main class="wrap">
+  <div class="pick"><label for="farmer" class="muted" style="font-size:13px">Farmer</label><select id="farmer"></select></div>
+  <div class="handset" id="phone">
+    <div class="speaker" aria-hidden="true"></div>
+    <div class="maker" aria-hidden="true">FIELDPHONE</div>
+    <div class="lcd" role="region" aria-label="Phone screen">
+      <div class="bar" aria-hidden="true">
+        <svg width="16" height="11" viewBox="0 0 16 11"><rect x="0" y="8" width="3" height="3"/><rect x="4.3" y="5.5" width="3" height="5.5"/><rect x="8.6" y="3" width="3" height="8"/><rect x="12.9" y="0" width="3" height="11"/></svg>
+        <span class="op" id="op">Airtel MW</span>
+        <span id="time">9:41</span>
+        <svg width="22" height="11" viewBox="0 0 22 11"><rect x=".5" y=".5" width="18" height="10" rx="2" fill="none" stroke="currentColor"/><rect x="2" y="2" width="12" height="7"/><rect x="19.5" y="3.5" width="2" height="4"/></svg>
+      </div>
+      <div class="view" id="view" aria-live="polite"></div>
+      <div class="soft" id="soft"><span id="soft-l"></span><span id="soft-c"></span><span id="soft-r"></span></div>
+    </div>
+    <div class="keys">
+      <div class="nav">
+        <button class="key soft-k" type="button" data-key="L" aria-label="Left soft key"></button>
+        <button class="key call" type="button" data-key="CALL" aria-label="Call"><svg viewBox="0 0 24 24"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1A17 17 0 0 1 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1l-2.3 2.2Z"/></svg></button>
+        <button class="key ok" type="button" data-key="OK" aria-label="OK">OK</button>
+        <button class="key end" type="button" data-key="END" aria-label="End"><svg viewBox="0 0 24 24"><path d="M12 9c-1.6 0-3.2.3-4.6.7v3.1c0 .4-.2.7-.6.9-1 .5-1.9 1.1-2.7 1.8-.2.2-.4.3-.7.3s-.5-.1-.7-.3L.3 13.1A1 1 0 0 1 0 12.4c0-.3.1-.5.3-.7A16.9 16.9 0 0 1 12 7c4.5 0 8.6 1.7 11.7 4.6.2.2.3.5.3.7 0 .3-.1.5-.3.7l-2.4 2.4c-.2.2-.4.3-.7.3s-.5-.1-.7-.3c-.8-.7-1.7-1.3-2.7-1.8-.3-.2-.6-.5-.6-.9V9.7C15.2 9.3 13.6 9 12 9Z"/></svg></button>
+        <button class="key soft-k" type="button" data-key="R" aria-label="Right soft key"></button>
+      </div>
+      <div class="pad" id="pad"></div>
+    </div>
+  </div>
+  <div class="quick"><button class="btn primary" type="button" id="quick-dial"></button><button class="btn" type="button" id="quick-sms">Messages</button></div>
+  <p class="note" id="note">Simulated keypad phone. USSD and SMS here never leave FieldWise.</p>
+</main>`,
+  `
+var CODE = "*384*123#";
+var TIMEOUT_MS = 120000;
+var KEYS = [["1", ""], ["2", "abc"], ["3", "def"], ["4", "ghi"], ["5", "jkl"], ["6", "mno"], ["7", "pqrs"], ["8", "tuv"], ["9", "wxyz"], ["*", "+"], ["0", "_"], ["#", ""]];
+var farmers = [], current = null, view = "idle", dialed = "", input = "", screen = "", session = null, inputs = [];
+var sms = [], readAt = 0, lastSmsId = null, timer = null, busy = false;
+var select = document.getElementById("farmer");
+var viewEl = document.getElementById("view");
+document.getElementById("quick-dial").textContent = "Dial " + CODE;
+
+function soft(l, c, r) {
+  document.getElementById("soft-l").textContent = l || "";
+  document.getElementById("soft-c").textContent = c || "";
+  document.getElementById("soft-r").textContent = r || "";
+}
+function clock() { return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }); }
+function seenKey() { return "fieldwise-sms-seen-" + (current ? current.id : ""); }
+function unread() {
+  var seen = Number(store(seenKey()) || 0);
+  return sms.filter(function (m) { return m.id > seen; }).length;
+}
+function buzz() {
+  var p = document.getElementById("phone");
+  p.classList.remove("buzz"); void p.offsetWidth; p.classList.add("buzz");
+}
+
+function draw() {
+  document.getElementById("time").textContent = clock();
+  viewEl.textContent = "";
+  if (view === "idle") {
+    var n = unread();
+    append(viewEl, el("div", { class: "idle" },
+      el("div", { class: "clock" }, clock()),
+      el("div", { class: "date" }, new Date().toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" })),
+      n > 0 && el("div", { class: "env" }, "✉ " + n + " new message" + (n > 1 ? "s" : ""))));
+    soft(n > 0 ? "Read" : "Messages", "", "Names");
+  } else if (view === "dial") {
+    append(viewEl, el("div", { class: "dialed" }, dialed));
+    soft("Call", "", "Clear");
+  } else if (view === "wait") {
+    append(viewEl, el("div", { class: "wait" }, el("div", {}, el("i"), "USSD code running...")));
+    soft("", "", "");
+  } else if (view === "ussd") {
+    append(viewEl, [screen, el("div", { class: "reply", "aria-label": "Your reply" }, input)]);
+    soft("Send", "", input ? "Clear" : "Cancel");
+  } else if (view === "ended") {
+    append(viewEl, screen);
+    soft("OK", "", "");
+  } else if (view === "inbox") {
+    if (!sms.length) { append(viewEl, el("div", { class: "wait" }, "No messages")); soft("", "", "Back"); return; }
+    var m = sms[sms.length - 1 - readAt];
+    append(viewEl, [
+      el("div", { class: "sms-meta" }, el("b", {}, "FieldWise"), " · " + new Date(m.at).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }), el("span", { class: "count" }, " " + (readAt + 1) + "/" + sms.length)),
+      m.body]);
+    soft(readAt < sms.length - 1 ? "Older" : "", "", "Back");
+  }
+  viewEl.scrollTop = 0;
+}
+
+function resetTimer() {
+  clearTimeout(timer);
+  timer = setTimeout(function () {
+    if (view !== "ussd") return;
+    session = null;
+    screen = "USSD session timed out. Please dial again.";
+    view = "ended";
+    draw();
+  }, TIMEOUT_MS);
+}
+
+function ussd(text) {
+  busy = true;
+  view = "wait"; draw();
+  var started = Date.now();
+  fetch("/ussd", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId: session, serviceCode: CODE, phoneNumber: current.phone, text: text })
+  }).then(function (r) {
+    if (r.status === 401) { forgetToken(); throw new Error("Wrong admin token"); }
+    return r.text();
+  }).then(function (reply) {
+    setTimeout(function () {
+      busy = false;
+      screen = reply.slice(4);
+      if (reply.indexOf("CON ") === 0) { view = "ussd"; resetTimer(); }
+      else { view = "ended"; session = null; clearTimeout(timer); }
+      draw();
+    }, Math.max(0, 700 - (Date.now() - started)));
+  }).catch(function (e) {
+    busy = false;
+    toast(e.message);
+    screen = "Connection problem or invalid MMI code.";
+    view = "ended"; session = null;
+    draw();
+  });
+}
+
+function startUssd() {
+  session = "sim_" + Math.random().toString(36).slice(2, 12);
+  inputs = [];
+  input = "";
+  dialed = "";
+  ussd("");
+}
+
+function press(k) {
+  if (!current || busy) return;
+  if (k === "END") {
+    clearTimeout(timer); session = null; input = ""; dialed = ""; view = "idle"; draw(); return;
+  }
+  if (view === "idle") {
+    if (k === "L") { view = "inbox"; readAt = 0; markRead(); }
+    else if (k.length === 1) { view = "dial"; dialed = k; }
+  } else if (view === "dial") {
+    if (k === "CALL" || k === "L" || k === "OK") {
+      if (dialed === CODE) return startUssd();
+      screen = /^\\*.*#$/.test(dialed) ? "Connection problem or invalid MMI code." : "Calls are off in this demo. Dial " + CODE + ".";
+      view = "ended";
+    } else if (k === "R") { dialed = dialed.slice(0, -1); if (!dialed) view = "idle"; }
+    else if (k.length === 1 && dialed.length < 20) dialed += k;
+  } else if (view === "ussd") {
+    if (k === "L" || k === "OK" || k === "CALL") {
+      if (!input) return;
+      inputs.push(input);
+      input = "";
+      return ussd(inputs.join("*"));
+    }
+    if (k === "R") {
+      if (input) input = input.slice(0, -1);
+      else { session = null; clearTimeout(timer); view = "idle"; }
+    } else if (k.length === 1 && input.length < 20) input += k;
+    resetTimer();
+  } else if (view === "ended") {
+    if (k === "L" || k === "OK") view = "idle";
+  } else if (view === "inbox") {
+    if (k === "L" && readAt < sms.length - 1) readAt++;
+    else if (k === "R" || k === "OK") view = "idle";
+  }
+  draw();
+}
+
+function markRead() {
+  if (sms.length) store(seenKey(), String(sms[sms.length - 1].id));
+}
+
+KEYS.forEach(function (k) {
+  append(document.getElementById("pad"), el("button", { class: "key", type: "button", "data-key": k[0], "aria-label": k[0] }, k[0], el("small", {}, k[1] || " ")));
+});
+document.querySelectorAll("[data-key]").forEach(function (b) {
+  b.addEventListener("click", function () { press(b.getAttribute("data-key")); });
+});
+var KEYMAP = { Enter: "OK", Backspace: "R", Escape: "END" };
+document.addEventListener("keydown", function (e) {
+  if (e.target === select || e.metaKey || e.ctrlKey || e.altKey) return;
+  var k = KEYMAP[e.key] || (/^[0-9*#]$/.test(e.key) ? e.key : null);
+  if (!k) return;
+  e.preventDefault();
+  var b = document.querySelector('[data-key="' + k + '"]');
+  if (b) { b.classList.add("down"); setTimeout(function () { b.classList.remove("down"); }, 120); }
+  press(k);
+});
+document.getElementById("quick-dial").addEventListener("click", function () {
+  if (!current || busy) return;
+  clearTimeout(timer);
+  startUssd();
+});
+document.getElementById("quick-sms").addEventListener("click", function () {
+  if (!current || busy) return;
+  view = "inbox"; readAt = 0; markRead(); draw();
+});
+
+function refresh() {
+  if (!current) return;
+  var id = current.id;
+  api("/farmers/" + encodeURIComponent(id) + "/messages").then(function (d) {
+    if (!current || current.id !== id) return;
+    sms = d.messages.filter(function (m) { return m.direction === "out" && m.kind === "sms"; });
+    var newest = sms.length ? sms[sms.length - 1].id : 0;
+    if (lastSmsId !== null && newest > lastSmsId) buzz();
+    lastSmsId = newest;
+    if (view === "idle") draw();
+    if (view === "inbox") markRead();
+  }).catch(function () {});
+}
+
+function choose(id) {
+  var next = farmers.filter(function (f) { return f.id === id; })[0] || farmers.filter(function (f) { return f.channel === "ussd"; })[0] || farmers[0];
+  if (!next) return;
+  if (next.channel !== "ussd") {
+    location.replace("/sim?farmer=" + encodeURIComponent(next.id) + "#token=" + encodeURIComponent(token));
+    return;
+  }
+  current = next;
+  store("fieldwise-sim-farmer", current.id);
+  select.value = current.id;
+  clearTimeout(timer);
+  view = "idle"; session = null; input = ""; dialed = ""; sms = []; lastSmsId = null;
+  document.getElementById("note").textContent = "Simulated keypad phone for " + current.name + ". USSD and SMS here never leave FieldWise.";
+  draw();
+  refresh();
+}
+select.addEventListener("change", function () { choose(select.value); });
+setInterval(function () { if (view === "idle") draw(); else document.getElementById("time").textContent = clock(); }, 15000);
+
+gate(function () {
+  api("/farmers").then(function (d) {
+    farmers = d.farmers;
+    farmers.forEach(function (f) {
+      append(select, el("option", { value: f.id }, f.name + " · " + (f.channel === "ussd" ? "keypad phone" : "WhatsApp")));
     });
     choose(new URLSearchParams(location.search).get("farmer") || store("fieldwise-sim-farmer"));
     setInterval(refresh, 1500);
@@ -475,7 +782,7 @@ export const officerPage = page(
 .bell svg { width: 20px; height: 20px; fill: var(--text); }
 .bell .badge { position: absolute; top: -3px; right: -3px; min-width: 19px; height: 19px; padding: 0 5px; border-radius: 999px; background: var(--red); color: #fff; font-size: 11px; font-weight: 700; display: grid; place-items: center; transform: scale(0); transition: transform .25s cubic-bezier(.2,.9,.25,1.3); }
 .bell .badge.on { transform: scale(1); }
-.body { flex: 1; overflow-y: auto; padding: 4px 14px 12px; display: grid; gap: 10px; align-content: start; }
+.body { flex: 1; overflow-y: auto; padding: 4px 14px 12px; display: grid; gap: 10px; align-content: start; grid-auto-rows: max-content; }
 .hero { background: var(--ink); color: var(--on-ink); border-radius: 24px; padding: 16px 18px; display: grid; gap: 4px; }
 .hero small { color: var(--on-ink-muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
 .hero b { font-size: 34px; line-height: 1.05; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
@@ -483,6 +790,15 @@ export const officerPage = page(
 .hero.urgent b { color: #FF9186; }
 .section { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; margin: 6px 4px 0; }
 .visit { background: var(--surface); border: 1px solid var(--hairline); border-radius: 18px; padding: 11px 14px 11px 16px; position: relative; overflow: hidden; text-align: left; width: 100%; display: grid; gap: 3px; }
+.visit .toggle { background: none; border: 0; padding: 0; text-align: left; display: grid; gap: 3px; width: 100%; color: inherit; }
+.acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.acts button, .acts a { border: 1px solid var(--hairline); background: var(--surface-2); color: var(--text); border-radius: 999px; padding: 5px 10px; font-size: 12px; font-weight: 600; text-decoration: none; }
+.acts button.primary { background: var(--primary); color: var(--on-primary); border-color: transparent; }
+.acts .sent { font-size: 12px; color: var(--green); font-weight: 600; align-self: center; }
+.call { background: var(--blue-soft); color: var(--on-blue-soft); border-radius: 18px; padding: 10px 14px; display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: center; }
+.call b { font-size: 14px; }
+.call span { font-size: 12.5px; grid-column: 1; }
+.call .acts { grid-column: 2; grid-row: 1 / span 2; margin: 0; }
 .visit::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--rank, var(--surface-3)); }
 .visit.changed { animation: flash 1.6s ease-out; }
 @keyframes flash { from { box-shadow: 0 0 0 3px var(--rank-soft, var(--primary-soft)); } to { box-shadow: 0 0 0 0 transparent; } }
@@ -538,7 +854,7 @@ export const officerPage = page(
 </main>`,
   PHONE_CLIENT + `
 var RANK_LABEL = { go_now: "Go now", this_week: "This week", no_response: "No reply: chase", recheck: "Re-check", waiting: "Waiting", none: "No action" };
-var seen = null, cards = {}, openId = null, farmCount = 0;
+var seen = null, seenCalls = null, cards = {}, openId = null, farmCount = 0, advice = [], composing = null, sentTo = {};
 
 function shortName(name) {
   var w = name.trim().split(/\\s+/);
@@ -570,11 +886,13 @@ function visit(f) {
     : el("div", { class: "why" }, "Flagged " + f.flagged);
   var state = f.state === "answered" ? "Answered" : f.state === "answering" ? "Answering, " + f.answered + " of 8" + (f.provisional ? " so far" : "")
     : f.state === "no_response" ? "No reply after a reminder" : f.queued ? "Alert sent, farmer hasn't started it yet" : "Alert sent, no answers yet";
-  var node = el("button", { type: "button", class: "visit r-" + f.rank + (openId === f.flag_id ? " open" : ""),
+  var node = el("div", { class: "visit r-" + f.rank + (openId === f.flag_id ? " open" : "") });
+  append(node, el("button", { type: "button", class: "toggle", "aria-expanded": openId === f.flag_id ? "true" : "false",
       on: { click: function () { openId = openId === f.flag_id ? null : f.flag_id; node.classList.toggle("open"); } } },
     el("div", { class: "top" }, el("b", {}, shortName(f.farmer.name)), el("span", { class: "crop" }, cap(f.crop)), el("span", { class: "chip " + f.rank }, RANK_LABEL[f.rank])),
     why,
-    el("div", { class: "state" }, state),
+    el("div", { class: "state" }, f.source === "farmer" ? "Farmer reported this · " + state : state)));
+  append(node, [
     f.also.length > 0 && el("div", { class: "state" }, "Also: " + f.also.map(function (a) {
       return cap(a.crop) + ": " + a.flagged + (a.state === "answered" ? " (answered)" : a.state === "answering" ? " (answering)" : "");
     }).join(", ")),
@@ -582,17 +900,61 @@ function visit(f) {
       el("div", {}, verdict(f)),
       r && r.answerLine && el("div", { class: "answers" }, r.answerLine),
       f.conditions && el("div", { class: "state" }, f.conditions),
-      r && r.notes.length > 0 && el("ul", {}, r.notes.map(function (n) { return el("li", {}, n); }))));
+      r && r.notes.length > 0 && el("ul", {}, r.notes.map(function (n) { return el("li", {}, n); })),
+      replies(f.farmer))]);
   return node;
 }
 
-function draw(farms) {
+/** Felix's buttons under a farm: call, a ready-made reply, or his own words. */
+function replies(farmer) {
+  var first = farmer.name.split(" ")[0];
+  var by = farmer.channel === "ussd" ? "SMS" : "WhatsApp";
+  if (sentTo[farmer.id]) return el("div", { class: "acts" }, el("span", { class: "sent" }, "Sent to " + first + " by " + by + ": " + sentTo[farmer.id]));
+  if (composing === farmer.id) {
+    return el("div", { class: "acts" }, advice.map(function (a) {
+      return el("button", { type: "button", on: { click: function () { message(farmer, { advice: a.id }, a.label); } } }, a.label);
+    }), el("button", { type: "button", on: { click: function () {
+      var text = prompt("Message to " + farmer.name + " (by " + by + ", 300 characters at most)");
+      if (text && text.trim()) message(farmer, { text: text }, "your message");
+    } } }, "Write…"), el("button", { type: "button", on: { click: function () { composing = null; refresh(); } } }, "Cancel"));
+  }
+  return el("div", { class: "acts" },
+    el("button", { type: "button", class: "primary", on: { click: function () { composing = farmer.id; refresh(); } } }, "Message " + first),
+    farmer.phone && el("a", { href: "tel:" + farmer.phone }, "Call " + farmer.phone));
+}
+
+function message(farmer, body, label) {
+  api("/farmers/" + encodeURIComponent(farmer.id) + "/messages", body).then(function () {
+    composing = null;
+    sentTo[farmer.id] = label;
+    setTimeout(function () { delete sentTo[farmer.id]; refresh(); }, 4000);
+    refresh();
+  }).catch(function (e) { toast(e.message); });
+}
+
+function callCard(c) {
+  var mins = Math.max(0, Math.round((Date.now() - Date.parse(c.requested_at)) / 60000));
+  return el("div", { class: "call" },
+    el("b", {}, "Call " + c.farmer.name),
+    el("span", {}, (c.farmer.farm_name ? c.farmer.farm_name + " · " : "") + "asked " + (mins < 1 ? "just now" : mins < 60 ? mins + " min ago" : Math.round(mins / 60) + " h ago")),
+    el("div", { class: "acts" },
+      el("a", { href: "tel:" + c.farmer.phone }, "Call"),
+      el("button", { type: "button", on: { click: function () {
+        api("/felix/callbacks/" + encodeURIComponent(c.id) + "/done", {}).then(refresh).catch(function (e) { toast(e.message); });
+      } } }, "Done")));
+}
+
+function draw(farms, calls) {
   var body = document.getElementById("body");
   body.textContent = "";
   var urgent = farms.filter(function (f) { return f.rank === "go_now"; });
   var badge = document.getElementById("badge");
-  badge.textContent = urgent.length;
-  badge.classList.toggle("on", urgent.length > 0);
+  badge.textContent = urgent.length + calls.length;
+  badge.classList.toggle("on", urgent.length + calls.length > 0);
+  if (calls.length) {
+    append(body, el("div", { class: "section" }, "Call back"));
+    calls.forEach(function (c) { append(body, callCard(c)); });
+  }
   if (!farms.length) {
     append(body, el("div", { class: "calm" }, el("b", {}, "No farms flagged"), "The forecast doesn't favour disease on any of your farms this week."));
     return;
@@ -613,7 +975,12 @@ function draw(farms) {
 }
 
 /** The one notification worth sending for what changed since the last look. */
-function notify(farms) {
+function notify(farms, calls) {
+  var callIds = {};
+  calls.forEach(function (c) { callIds[c.id] = true; });
+  var newCall = seenCalls && calls.filter(function (c) { return !seenCalls[c.id]; })[0];
+  seenCalls = callIds;
+  if (newCall) banner("Call back · " + shortName(newCall.farmer.name), newCall.farmer.name + " asked you to call them on " + newCall.farmer.phone + ".");
   var now = {};
   var names = {};
   farms.forEach(function (f) {
@@ -621,7 +988,7 @@ function notify(farms) {
     names[f.flag_id] = f.flagged;
     f.also.forEach(function (a) { now[a.flag_id] = { state: a.state, rank: a.rank }; names[a.flag_id] = a.flagged; });
   });
-  if (seen) {
+  if (seen && !newCall) {
     var finished = farms.filter(function (f) { return f.state === "answered" && seen[f.flag_id] && seen[f.flag_id].state !== "answered"; });
     var turnedUrgent = farms.filter(function (f) { return f.rank === "go_now" && f.state !== "answered" && (!seen[f.flag_id] || seen[f.flag_id].rank !== "go_now"); });
     var raised = Object.keys(now).filter(function (id) { return !seen[id]; });
@@ -632,6 +999,9 @@ function notify(farms) {
       var u = turnedUrgent[0];
       banner("Urgent · " + shortName(u.farmer.name) + " · " + cap(u.crop),
         "Answers so far point to " + list(u.report.answersSay) + ". Go now.");
+    } else if (raised.length && farms.some(function (f) { return f.source === "farmer" && raised.indexOf(f.flag_id) !== -1; })) {
+      var rep = farms.filter(function (f) { return f.source === "farmer" && raised.indexOf(f.flag_id) !== -1; })[0];
+      banner("Farmer report · " + shortName(rep.farmer.name), rep.farmer.name + " reported a problem with their " + rep.crop + " and is answering the questions.");
     } else if (raised.length) {
       var farmsRaised = farms.filter(function (f) {
         return raised.indexOf(f.flag_id) !== -1 || f.also.some(function (a) { return raised.indexOf(a.flag_id) !== -1; });
@@ -647,8 +1017,8 @@ function notify(farms) {
 
 function refresh() {
   api("/felix/priority?days=14").then(function (d) {
-    notify(d.farms);
-    draw(d.farms);
+    notify(d.farms, d.callbacks || []);
+    draw(d.farms, d.callbacks || []);
   }).catch(function () {});
 }
 
@@ -663,6 +1033,7 @@ gate(function () {
     farmCount = d.farmers.length;
     document.getElementById("area").textContent = "Kasungu · " + farmCount + " farms";
   }).catch(function () {});
+  api("/felix/advice").then(function (d) { advice = d.advice; }).catch(function () {});
   refresh();
   setInterval(refresh, 2000);
 });
@@ -737,6 +1108,10 @@ td + td, th + th { text-align: right; padding-left: 8px; }
 .empty { background: var(--surface); border: 1px dashed var(--hairline); border-radius: 20px; padding: 28px; text-align: center; color: var(--muted); }
 .quiet { font-size: 13px; color: var(--muted); }
 .legend { font-size: 12.5px; color: var(--muted); }
+.panel textarea { background: var(--surface); border: 1px solid var(--hairline); border-radius: 12px; padding: 8px 12px; font: inherit; resize: vertical; min-height: 64px; color: inherit; }
+.callrow { display: flex; gap: 8px; align-items: center; font-size: 14px; }
+.callrow span { flex: 1; min-width: 0; }
+.callrow small { display: block; color: var(--muted); font-size: 12.5px; }
 `,
   `<header class="top"><div class="top-in">
   <span class="brand"><i></i>FieldWise</span>
@@ -761,6 +1136,14 @@ td + td, th + th { text-align: right; padding-left: 8px; }
           <button class="btn danger" data-act="reset" type="button">Reset demo</button>
         </div>
         <p class="legend">Wet and dry spells run made-up weather through the real rules. Flags they raise are tagged “Scenario”. A dry spell re-arms alerts, so the next wet spell fires again.</p>
+      </div>
+      <div class="panel"><h2 style="margin:0">Call back</h2><div class="rows" id="calls"></div></div>
+      <div class="panel" id="broadcast">
+        <h2 style="margin:0">Message all farmers</h2>
+        <select id="b-advice" aria-label="Ready-made message"><option value="">Write my own…</option></select>
+        <textarea id="b-text" maxlength="300" placeholder="e.g. Heavy rain is forecast this week. Check your plants on Thursday."></textarea>
+        <button class="btn primary" type="button" id="b-send">Send to every farmer</button>
+        <p class="legend">Goes by SMS to keypad phones and by WhatsApp to smartphones, from Felix. Demo farmers' messages stay in FieldWise.</p>
       </div>
       <div class="panel"><h2 style="margin:0">Outcomes</h2><div class="rows" id="outcomes"></div></div>
       <div class="panel"><h2 style="margin:0">By disease</h2><div id="diseases"></div></div>
@@ -816,6 +1199,7 @@ function card(f) {
       el("span", { class: "tag" }, cap(f.crop)),
       f.farmer.farm_name && el("span", { class: "farm" }, f.farmer.farm_name),
       f.source === "scenario" && el("span", { class: "tag" }, "Scenario"),
+      f.source === "farmer" && el("span", { class: "tag" }, "Farmer report"),
       el("span", { class: "chip " + f.rank }, RANK_LABEL[f.rank])),
     verdict,
     el("div", { class: "meta" }, el("span", {}, progress), f.state === "answering" && el("span", { class: "bar", "aria-hidden": "true" }, el("i", { style: "width:" + Math.round(f.answered / 8 * 100) + "%" }))),
@@ -836,8 +1220,21 @@ function draw(priority, summary) {
     stat(summary.urgent, "need a visit now", summary.urgent > 0),
     stat(pct(summary.response_rate), "farmers answered"),
     stat(summary.outcomes.wrong_flag, "wrong flags caught by Q4"),
-    stat(summary.states.no_response, "silent after a reminder")
+    stat(summary.states.no_response, "silent after a reminder"),
+    stat(summary.farmer_reports, "reported by farmers"),
+    stat((priority.callbacks || []).length, "asked for a call", (priority.callbacks || []).length > 0)
   ]);
+
+  var calls = document.getElementById("calls");
+  calls.textContent = "";
+  if (!(priority.callbacks || []).length) append(calls, el("p", { class: "quiet", style: "margin:0" }, "Nobody is waiting for a call."));
+  (priority.callbacks || []).forEach(function (c) {
+    append(calls, el("div", { class: "callrow" },
+      el("span", {}, c.farmer.name, el("small", {}, c.farmer.phone + " · asked " + when(c.requested_at))),
+      el("button", { class: "btn", type: "button", on: { click: function () {
+        api("/felix/callbacks/" + encodeURIComponent(c.id) + "/done", {}).then(refresh).catch(function (e) { toast(e.message); });
+      } } }, "Done")));
+  });
 
   var list = document.getElementById("list");
   list.textContent = "";
@@ -940,11 +1337,33 @@ document.querySelectorAll("#demo button").forEach(function (b) {
 });
 days.addEventListener("change", function () { store("fieldwise-days", days.value); firstLoad = true; refresh(); });
 
+var adviceSel = document.getElementById("b-advice"), adviceText = document.getElementById("b-text"), adviceList = [];
+adviceSel.addEventListener("change", function () {
+  var a = adviceList.filter(function (x) { return x.id === adviceSel.value; })[0];
+  adviceText.value = a ? a.text.en : "";
+  adviceText.disabled = !!a;
+});
+document.getElementById("b-send").addEventListener("click", function () {
+  var body = adviceSel.value ? { advice: adviceSel.value } : { text: adviceText.value };
+  if (!adviceSel.value && !adviceText.value.trim()) return toast("Write a message first.");
+  if (!confirm("Send this to every farmer?")) return;
+  var b = document.getElementById("b-send");
+  b.disabled = true;
+  api("/felix/broadcast", body).then(function (d) {
+    toast("Sent to " + d.sent + " farmers.");
+    adviceText.value = ""; adviceSel.value = ""; adviceText.disabled = false;
+  }).catch(function (e) { toast(e.message); }).then(function () { b.disabled = false; });
+});
+
 gate(function () {
   api("/farmers").then(function (d) {
     farmers = d.farmers;
     var target = document.getElementById("target");
     farmers.forEach(function (f) { append(target, el("option", { value: f.id }, f.name)); });
+    api("/felix/advice").then(function (a) {
+      adviceList = a.advice;
+      adviceList.forEach(function (x) { append(adviceSel, el("option", { value: x.id }, x.label)); });
+    }).catch(function () {});
     refresh();
     // Same pace as Felix's phone, so both update together on stage.
     setInterval(refresh, 2000);
@@ -983,7 +1402,7 @@ body { height: 100vh; display: flex; flex-direction: column; }
     <button class="btn" type="button" data-act="dry">Dry spell</button>
     <button class="btn danger" type="button" data-act="reset">Reset</button>
   </span>
-  <span class="sp"></span><a href="/sim" target="_blank" rel="noopener">Farmer's phone</a><a href="/officer" target="_blank" rel="noopener">Felix's phone</a><a href="/dashboard" target="_blank" rel="noopener">Dashboard</a></div>
+  <span class="sp"></span><a href="/phone" target="_blank" rel="noopener">Keypad phone</a><a href="/sim" target="_blank" rel="noopener">WhatsApp phone</a><a href="/officer" target="_blank" rel="noopener">Felix's phone</a><a href="/dashboard" target="_blank" rel="noopener">Dashboard</a></div>
 <div class="panes" id="panes"></div>`,
   `
 gate(function () {

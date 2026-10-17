@@ -6,6 +6,10 @@
 // off Felix's list. Black rot's re-check skips the pick and goes straight to
 // the cabbage questions.
 //
+// A farmer on USSD can also report a problem themselves (report): that opens a
+// round straight on the plant's questions, with no alert, because they are
+// already looking at the screen.
+//
 // Housekeeping (sweep) runs on the cron: one reminder after a day of silence
 // (sooner on WhatsApp, see reminderDueAt), "no response" 24 h after that, and
 // black rot's re-ask a week after a clear.
@@ -91,6 +95,17 @@ export function currentPrompt(round: Round, sessions: StoredSession[], lang: Lan
   return pickPrompt(offeredCrops(sessions), lang);
 }
 
+/** Options for an incoming reply. */
+export interface InboundOptions {
+  /** For a WhatsApp button tap: the screen the button belonged to. */
+  screen?: string;
+  /**
+   * The farmer is in a live USSD session: the replies are shown on their
+   * screen by the caller, not sent, and their keypress is logged as USSD.
+   */
+  live?: boolean;
+}
+
 export class Conversations {
   constructor(
     private store: Store,
@@ -102,7 +117,7 @@ export class Conversations {
    * Raise a farm's new flags. They join the farmer's open round, or open a
    * new one with an alert and the "which plant?" list.
    */
-  async raise(farmer: Farmer, raises: Raise[]): Promise<Flag[]> {
+  async raise(farmer: Farmer, raises: Raise[], { silent = false }: { silent?: boolean } = {}): Promise<Flag[]> {
     const at = this.now().toISOString();
     const flags: Flag[] = [];
     const sessions: StoredSession[] = [];
@@ -139,20 +154,28 @@ export class Conversations {
         }
       }
       await this.store.addFlagsWithSessions(flags, sessions);
-      if (nudges.length) await this.outbox.send(farmer, nudges);
+      if (nudges.length && !silent) await this.outbox.send(farmer, nudges);
       return flags;
     }
 
-    // A re-check goes straight to its plant's questions; anything else starts
-    // with the list of plants at risk.
-    const recheck = sessions.every((s) => flags.find((f) => f.id === s.flag_id)!.reason === "recheck");
+    // A re-check, or the farmer's own report, goes straight to its plant's
+    // questions; anything else starts with the list of plants at risk.
     const reasons = new Set(sessions.map((s) => flags.find((f) => f.id === s.flag_id)!.reason));
-    const reason: FlagReason = recheck ? "recheck" : reasons.has("new") ? "new" : reasons.has("worse") ? "worse" : "manual";
+    const direct = [...reasons].every((r) => r === "recheck" || r === "report");
+    const reason: FlagReason = reasons.has("report")
+      ? "report"
+      : direct
+        ? "recheck"
+        : reasons.has("new")
+          ? "new"
+          : reasons.has("worse")
+            ? "worse"
+            : "manual";
     const opened: Round = {
       id: newId("rnd"),
       farmer_id: farmer.id,
       status: "open",
-      screen: !farmer.lang ? "lang" : recheck ? "questions" : "pick",
+      screen: !farmer.lang ? "lang" : direct ? "questions" : "pick",
       reason,
       created_at: at,
       last_activity_at: at,
@@ -162,27 +185,57 @@ export class Conversations {
     };
     for (const s of sessions) {
       s.round_id = opened.id;
-      s.status = recheck ? "queued" : "offered";
+      s.status = direct ? "queued" : "offered";
     }
-    if (recheck) activate(sessions[0], farmer.lang, at);
+    if (direct) activate(sessions[0], farmer.lang, at);
     await this.store.addFlagsWithSessions(flags, sessions, opened);
-    await this.outbox.send(farmer, [...nudges, alertText(reason, cropOf(sessions[0]), farmer.lang), currentPrompt(opened, sessions, farmer.lang)]);
+    if (!silent) {
+      await this.outbox.send(farmer, [...nudges, alertText(reason, cropOf(sessions[0]), farmer.lang), currentPrompt(opened, sessions, farmer.lang)]);
+    }
     return flags;
   }
 
   /**
-   * A message from a farmer. Returns what was sent back. `screen` is set for a
-   * WhatsApp button tap: the screen the button belonged to.
+   * The farmer reports a problem with a plant (from the USSD menu). Opens a
+   * round on that plant's first questionnaire, which asks about the other
+   * likely problems too, and returns its first screen. Null if a round is
+   * already open: the farmer answers that first.
    */
-  async inbound(phone: string, text: string, { screen }: { screen?: string } = {}): Promise<string[]> {
+  async report(farmer: Farmer, crop: Crop): Promise<Prompt | null> {
+    if (await this.store.openRound(farmer.id)) return null;
+    const disease = DISEASES.find((d) => QUESTIONNAIRES[d].crop === crop)!;
+    await this.raise(farmer, [{ disease, reason: "report", source: "farmer", details: {} }], { silent: true });
+    const round = await this.store.openRound(farmer.id);
+    return round ? currentPrompt(round, await this.store.roundSessions(round.id), farmer.lang) : null;
+  }
+
+  /** The screen in front of the farmer, or null when no round is open. */
+  async current(farmer: Farmer): Promise<Prompt | null> {
+    const round = await this.store.openRound(farmer.id);
+    return round ? currentPrompt(round, await this.store.roundSessions(round.id), farmer.lang) : null;
+  }
+
+  /** A message from a farmer. Returns what was sent back, as text. */
+  async inbound(phone: string, text: string, options: InboundOptions = {}): Promise<string[]> {
     const farmer = await this.store.getFarmerByPhone(phone);
     if (!farmer) return [NOT_REGISTERED];
+    return (await this.respond(farmer, text, options)).map((m) => (typeof m === "string" ? m : toText(m)));
+  }
+
+  /**
+   * A message from a known farmer. Returns the replies; they have been sent
+   * unless the farmer is in a live USSD session (options.live).
+   */
+  async respond(farmer: Farmer, text: string, { screen, live = false }: InboundOptions = {}): Promise<Outgoing[]> {
     const at = this.now().toISOString();
-    await this.store.logMessage({ farmer_id: farmer.id, direction: "in", channel: farmer.channel, body: text, at });
+    await this.store.logMessage({ farmer_id: farmer.id, direction: "in", channel: farmer.channel, body: text, at, kind: live ? "ussd" : null });
 
     for (let attempt = 0; attempt < SAVE_ATTEMPTS; attempt++) {
       const replies = await this.handle(farmer, text, screen, at);
-      if (replies) return this.send(farmer, replies);
+      if (replies) {
+        if (!live) await this.outbox.send(farmer, replies);
+        return replies;
+      }
     }
     console.error(`Reply from ${farmer.id} kept conflicting with other replies; dropped`);
     return [];
@@ -350,10 +403,6 @@ export class Conversations {
     return { reminded, noResponse, rechecks };
   }
 
-  private async send(farmer: Farmer, messages: Outgoing[]): Promise<string[]> {
-    await this.outbox.send(farmer, messages);
-    return messages.map((m) => (typeof m === "string" ? m : toText(m)));
-  }
 }
 
 function newSession(flag: Flag, farmer: Farmer, at: string): StoredSession {

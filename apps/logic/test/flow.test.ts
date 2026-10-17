@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { apply, runChecks, scenarioAssessment, type Assessment } from "../src/checks";
 import { Conversations, reminderDueAt, type Raise } from "../src/conversation";
+import { toText } from "../src/engine";
 import { Outbox } from "../src/outbox";
 import type { DiseaseId } from "../src/questionnaires";
 import { Store, type Farmer, type FlagDetails, type FlagReason } from "../src/store";
@@ -205,9 +206,12 @@ describe("silent farmers", () => {
     expect((await conversations.sweep()).rechecks).toBe(1);
     const recheck = (await store.listFlags("F062"))[0];
     expect(recheck).toMatchObject({ disease: "black_rot", reason: "recheck", status: "awaiting" });
+    // Esther Chirwa is on USSD: the re-check is one SMS saying what to dial,
+    // and the dial opens straight on the cabbage questions.
     const messages = await outgoing("F062");
-    expect(messages.at(-2)).toContain("chonde yang'aniraninso kabichi wanu");
-    expect(messages.at(-1)).toMatch(/^Kabichi wanu · 1 mwa 8/);
+    expect(messages.at(-1)).toContain("chonde yang'aniraninso kabichi wanu");
+    expect(messages.at(-1)).toMatch(/Imbani \*384\*123# kuti muyankhe\.$/);
+    expect(toText((await conversations.current(await farmer("F062")))!)).toMatch(/^Kabichi wanu · 1 mwa 8/);
   });
 });
 

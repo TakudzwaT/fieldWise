@@ -9,6 +9,17 @@ import type { FlagReason } from "./store";
 
 type Template = (crop: string) => Text;
 
+/**
+ * The USSD code farmers dial. A placeholder until a code is leased from
+ * Airtel and TNM through a gateway such as Africa's Talking.
+ */
+export const USSD_CODE = "*384*123#";
+
+const DIAL: Text = {
+  en: `Dial ${USSD_CODE} to answer.`,
+  ny: `Imbani ${USSD_CODE} kuti muyankhe.`,
+};
+
 // A round's alert is about the farm, not one plant: the farmer picks which
 // at-risk plant to report on next. A re-check is about one plant.
 const ALERT: Record<Exclude<FlagReason, "recheck">, Text> = {
@@ -23,6 +34,12 @@ const ALERT: Record<Exclude<FlagReason, "recheck">, Text> = {
   worse: {
     en: "FieldWise: the weather is getting worse for your crops. Please check your plants again today and tell us what you see.",
     ny: "FieldWise: nyengo ikuipiraipira pa mbewu zanu. Chonde yang'aniraninso mbewu zanu lero ndi kutiuza zomwe mwaona.",
+  },
+  // The farmer's own report is answered in the same USSD session, so this
+  // only goes out if they need reminding.
+  report: {
+    en: "FieldWise: thank you for telling us about a crop problem. Please answer a few questions about it.",
+    ny: "FieldWise: zikomo potiuza za vuto la mbewu. Chonde yankhani mafunso ochepa okhudza vutoli.",
   },
 };
 
@@ -148,3 +165,109 @@ export const noQuestionsText = (lang: Lang | null) => say((l) => NO_QUESTIONS[l]
 export const staleText = (lang: Lang | null) => say((l) => STALE[l], lang);
 
 export const stoppedText = (lang: Lang | null) => say((l) => STOPPED[l], lang);
+
+/** "Dial *384*123# to answer.", added to an SMS that asks a question. */
+export const dialText = (lang: Lang | null) => say((l) => DIAL[l], lang);
+
+/** An officer's message to a farmer: "Felix (FieldWise): ..." */
+export const officerText = (officer: string, text: string) => `${officer} (FieldWise): ${text}`;
+
+// Felix's ready-made replies. They promise a visit or give general advice;
+// what to spray is for Felix to say in person. Chichewa is an unverified draft.
+export const ADVICE = {
+  visit_today: {
+    label: "Visiting today",
+    text: {
+      en: "I will visit your farm today to look at your crops.",
+      ny: "Ndibwera kumunda kwanu lero kudzaona mbewu zanu.",
+    },
+  },
+  visit_week: {
+    label: "Visiting this week",
+    text: {
+      en: "I will visit your farm this week to look at your crops.",
+      ny: "Ndibwera kumunda kwanu sabata ino kudzaona mbewu zanu.",
+    },
+  },
+  remove_leaves: {
+    label: "Remove affected plants",
+    text: {
+      en: "Remove badly affected leaves or plants. Take them out of the field and burn or bury them. Wash your hands and tools afterwards.",
+      ny: "Chotsani masamba kapena mbewu zowonongeka kwambiri. Zitulutseni m'munda ndi kuzitentha kapena kuzikwirira. Kenako sambani m'manja ndi zipangizo.",
+    },
+  },
+  keep_watching: {
+    label: "Keep checking",
+    text: {
+      en: `Keep checking your plants every few days. Dial ${USSD_CODE} if it gets worse.`,
+      ny: `Pitirizani kuyang'ana mbewu zanu masiku angapo aliwonse. Imbani ${USSD_CODE} ngati zikuipiraipira.`,
+    },
+  },
+  all_clear: {
+    label: "All clear",
+    text: {
+      en: "Thank you for your answers. Your crops look fine for now. No action is needed.",
+      ny: "Zikomo chifukwa cha mayankho anu. Mbewu zanu zili bwino pakadali pano. Palibe chochita.",
+    },
+  },
+} satisfies Record<string, { label: string; text: Text }>;
+export type AdviceId = keyof typeof ADVICE;
+
+/** A ready-made reply in the farmer's language, or both while it is not known. */
+export const adviceText = (id: AdviceId, lang: Lang | null) => say((l) => ADVICE[id].text[l], lang);
+
+// USSD screens. A screen holds about 182 characters, so these are short.
+
+/** "Felix", or "your officer" for a farmer without one. */
+const officerName = (name: string | null, lang: Lang) => name ?? (lang === "en" ? "your officer" : "mlangizi wanu");
+
+/** The menu a farmer sees when they dial with nothing waiting (or press 0). */
+export function homePrompt(lang: Lang, officer: string | null, roundOpen: boolean, retry = false): Prompt {
+  const name = officerName(officer, lang);
+  const items: Record<Lang, string[]> = {
+    en: [roundOpen ? "Answer our questions" : "Report a crop problem", `Messages from ${name}`, `Ask ${name} to call me`, "Language"],
+    ny: [roundOpen ? "Yankhani mafunso athu" : "Nenani vuto la mbewu", `Mauthenga ochokera kwa ${name}`, `${name} andiyimbire foni`, "Chiyankhulo"],
+  };
+  return {
+    key: "home",
+    body: retry ? `${NUMBER_RETRY[lang]}\nFieldWise` : "FieldWise",
+    options: items[lang].map((label, i) => ({ reply: String(i + 1), label })),
+  };
+}
+
+const NUMBER_RETRY: Text = { en: "Please reply with a number.", ny: "Chonde yankhani ndi nambala." };
+
+const REPORT_PICK: Text = { en: "Which plant has a problem?", ny: "Ndi mbewu iti yomwe ili ndi vuto?" };
+
+/** "Which plant has a problem?" with every crop FieldWise asks about. */
+export function reportPrompt(crops: readonly Crop[], lang: Lang, retry = false): Prompt {
+  return {
+    key: "report",
+    body: retry ? `${NUMBER_RETRY[lang]}\n${REPORT_PICK[lang]}` : REPORT_PICK[lang],
+    options: crops.map((crop, i) => ({ reply: String(i + 1), label: CROP_NAME[crop][lang] })),
+  };
+}
+
+export const callbackText = (officer: string | null, lang: Lang, already: boolean) => {
+  const name = officerName(officer, lang);
+  if (already) return lang === "en" ? `${name} already has your request and will call you soon.` : `${name} walandira kale pempho lanu ndipo akuyimbirani posachedwa.`;
+  return lang === "en" ? `Thank you. ${name} will call you soon.` : `Zikomo. ${name} akuyimbirani foni posachedwa.`;
+};
+
+export const noOfficerMessagesText = (officer: string | null, lang: Lang) => {
+  const name = officerName(officer, lang);
+  return lang === "en" ? `No messages from ${name} yet.` : `Palibe mauthenga ochokera kwa ${name} pano.`;
+};
+
+/** One message in the USSD inbox, newest first, with a way back. */
+export function inboxPrompt(body: string, hasOlder: boolean, lang: Lang): Prompt {
+  const options = [{ reply: "0", label: lang === "en" ? "Menu" : "Menyu" }];
+  if (hasOlder) options.unshift({ reply: "1", label: lang === "en" ? "Older" : "Akale" });
+  return { key: "inbox", body, options };
+}
+
+/** The "0 Menu" line under a question on USSD. */
+export const menuOption = (lang: Lang) => ({ reply: "0", label: lang === "en" ? "Menu" : "Menyu" });
+
+export const USSD_NOT_REGISTERED =
+  "FieldWise: this number is not registered. Ask your extension officer to add you.\nNambala iyi sinalembetsedwe. Funsani mlangizi wanu.";
