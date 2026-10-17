@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "fieldwise-logic",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+  "triggers": {
+    // 15 minutes past each hour, after the weather API's refresh at :05.
+    "crons": ["15 * * * *"]
+  },
+  "vars": {
+    "WEATHER_API": "https://fieldwise-api.takudzwamhizha132.workers.dev",
+    // No token needed for the made-up demo farmers; see src/index.ts.
+    "OPEN_DEMO": "true"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fieldwise-logic",
+      // Created with `wrangler d1 create fieldwise-logic` (region WEUR).
+      "database_id": "058d4657-a279-410b-b459-6d6b1a8a9b5e",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
