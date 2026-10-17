@@ -12,7 +12,8 @@ so apps can call it as often as they like.
 
 It runs as one [Cloudflare Worker](https://developers.cloudflare.com/workers/)
 (TypeScript) with one D1 database, on Cloudflare's free plan. Every push to the
-`backend` branch that touches `apps/api` deploys automatically.
+`backend` branch that touches `apps/api` deploys automatically, through
+Cloudflare Workers Builds.
 
 > **Status:** every endpoint and the hourly job have been tested locally with
 > `wrangler dev` against live Open-Meteo data.
@@ -24,8 +25,8 @@ It runs as one [Cloudflare Worker](https://developers.cloudflare.com/workers/)
 ### Base URL
 
 `https://fieldwise-api.<subdomain>.workers.dev`, where `<subdomain>` is the
-Cloudflare account's workers.dev subdomain. Each deploy prints the exact URL
-in the GitHub Actions run summary.
+Cloudflare account's workers.dev subdomain. The current one is
+https://fieldwise-api.takudzwamhizha132.workers.dev.
 
 All endpoints are `GET`, need no key, and return JSON. Any website may call
 them (CORS allows all origins), since the data is public and read-only.
@@ -283,46 +284,31 @@ Errors return `{ "error": "<message>" }` and are never cached.
 
 ## Deploying
 
-Deploys are automatic. Every push to the `backend` branch that changes
-`apps/api/` runs [`.github/workflows/deploy-api.yml`](../../.github/workflows/deploy-api.yml),
-which:
+Deploys are automatic, through [Cloudflare Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/).
+Cloudflare watches this GitHub repo. On every push to the `backend` branch
+that changes `apps/api/`, it:
 
-1. type-checks the code
+1. installs dependencies and type-checks the code (`npm run typecheck`)
 2. applies any new database migrations in `migrations/` to the live D1 database
 3. deploys the Worker
-4. calls `/health/live` and fails the run if it doesn't answer
 
-You can also run it by hand from GitHub (**Actions → Deploy API → Run workflow**),
-but only once the workflow file is on `main`. Until then, a push that changes
-`apps/api/` is the only way to trigger it.
-
-The repo is public because GitHub Actions on private repos needs working
-billing on the owner's account; public repos run Actions for free.
+Builds run on Cloudflare's machines, not GitHub Actions, so they don't depend
+on the GitHub account's billing. Build logs are in the Cloudflare dashboard
+under **Workers & Pages → fieldwise-api → Deployments**. To rebuild without a
+new commit, click **Retry build** on the latest build there.
 
 ### One-time setup
 
-This has to be done once per Cloudflare account. These steps are already done
-for the current account.
+This is done once per Cloudflare account. It's already done for the current
+account.
 
 1. **Account.** Sign up at [dash.cloudflare.com](https://dash.cloudflare.com/sign-up)
-   (free, no card). Open **Workers & Pages** once so a workers.dev subdomain
-   exists.
-2. **API token for GitHub.** Go to **My Profile → API Tokens → Create Token**.
-   Use the **Edit Cloudflare Workers** template, then add the permission
-   **Account → D1 → Edit**. Store the token as a repo secret:
+   (free, no card).
+2. **Database.** Run these from `apps/api`:
 
    ```bash
-   gh secret set CLOUDFLARE_API_TOKEN --repo TakudzwaT/fieldWise
+   npx wrangler login
    ```
-
-3. **Account ID.** It's shown by `npx wrangler whoami`, or on the dashboard's
-   account home page. It isn't secret. Store it as a repo variable:
-
-   ```bash
-   gh variable set CLOUDFLARE_ACCOUNT_ID --repo TakudzwaT/fieldWise
-   ```
-
-4. **Database.** Run this once from `apps/api`, after `npx wrangler login`:
 
    ```bash
    npx wrangler d1 create fieldwise
@@ -330,6 +316,32 @@ for the current account.
 
    Copy the `database_id` it prints into `wrangler.jsonc`, and commit it. The
    ID isn't secret.
+3. **First deploy.** This creates the Worker so it can be connected to Git:
+
+   ```bash
+   npm run db:migrate:remote && npm run deploy
+   ```
+
+4. **Connect the repo.** In the dashboard, open **Workers & Pages →
+   fieldwise-api → Settings → Build → Connect**. Install the Cloudflare GitHub
+   app on `TakudzwaT/fieldWise` only, then set:
+
+   | Setting | Value |
+   |---|---|
+   | Production branch | `backend` |
+   | Build command | `npm run typecheck` |
+   | Deploy command | `npx wrangler d1 migrations apply fieldwise --remote && npx wrangler deploy` |
+   | Root directory | `apps/api` |
+   | Builds for non-production branches | Off |
+   | Build watch paths, include | `apps/api/*` |
+
+### Deploying by hand
+
+From `apps/api`, after `npx wrangler login`, run:
+
+```bash
+npm run db:migrate:remote && npm run deploy
+```
 
 ### Logs
 
