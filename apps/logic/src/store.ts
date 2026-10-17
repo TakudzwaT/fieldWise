@@ -71,7 +71,15 @@ export interface Message {
   at: string;
 }
 
+export interface FlagRow {
+  flag: Flag;
+  session: StoredSession | null;
+  farmer: Pick<Farmer, "id" | "name" | "farm_name" | "crop">;
+}
+
 type Row = Record<string, unknown>;
+
+export const trackKey = (farmerId: string, disease: string) => `${farmerId}|${disease}`;
 
 export class Store {
   constructor(private db: D1Database) {}
@@ -118,33 +126,46 @@ export class Store {
 
   // Tracks
 
-  async getTrack(farmerId: string, disease: DiseaseId): Promise<Track | undefined> {
-    const row = await this.db
-      .prepare("SELECT status, armed, peak, alerted_at FROM tracks WHERE farmer_id = ? AND disease = ?")
-      .bind(farmerId, disease)
-      .first<{ status: Status; armed: number; peak: number | null; alerted_at: string | null }>();
-    return row ? { status: row.status, armed: row.armed === 1, peak: row.peak, alertedAt: row.alerted_at } : undefined;
+  /** Every track, keyed "farmerId|disease", in one query. */
+  async listTracks(): Promise<Map<string, Track>> {
+    const { results } = await this.db
+      .prepare("SELECT farmer_id, disease, status, armed, peak, alerted_at FROM tracks")
+      .all<{ farmer_id: string; disease: DiseaseId; status: Status; armed: number; peak: number | null; alerted_at: string | null }>();
+    return new Map(
+      results.map((row) => [
+        trackKey(row.farmer_id, row.disease),
+        { status: row.status, armed: row.armed === 1, peak: row.peak, alertedAt: row.alerted_at },
+      ]),
+    );
   }
 
-  async saveTrack(farmerId: string, disease: DiseaseId, track: Track, checkedAt: string): Promise<void> {
-    await this.db
+  /** Save many tracks in one batch. */
+  async saveTracks(rows: { farmerId: string; disease: DiseaseId; track: Track }[], checkedAt: string): Promise<void> {
+    if (!rows.length) return;
+    await this.db.batch(rows.map(({ farmerId, disease, track }) => this.trackStatement(farmerId, disease, track, checkedAt)));
+  }
+
+  private trackStatement(farmerId: string, disease: DiseaseId, track: Track, checkedAt: string): D1PreparedStatement {
+    return this.db
       .prepare(
         `INSERT INTO tracks (farmer_id, disease, status, armed, peak, alerted_at, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (farmer_id, disease) DO UPDATE SET
            status = excluded.status, armed = excluded.armed, peak = excluded.peak,
            alerted_at = excluded.alerted_at, checked_at = excluded.checked_at`,
       )
-      .bind(farmerId, disease, track.status, track.armed ? 1 : 0, track.peak, track.alertedAt, checkedAt)
-      .run();
+      .bind(farmerId, disease, track.status, track.armed ? 1 : 0, track.peak, track.alertedAt, checkedAt);
   }
 
   // Flags
 
   async addFlag(flag: Flag): Promise<void> {
-    await this.db
+    await this.flagInsert(flag).run();
+  }
+
+  private flagInsert(flag: Flag): D1PreparedStatement {
+    return this.db
       .prepare("INSERT INTO flags (id, farmer_id, disease, reason, source, raised_at, details, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(flag.id, flag.farmer_id, flag.disease, flag.reason, flag.source, flag.raised_at, JSON.stringify(flag.details), flag.status)
-      .run();
+      .bind(flag.id, flag.farmer_id, flag.disease, flag.reason, flag.source, flag.raised_at, JSON.stringify(flag.details), flag.status);
   }
 
   async getFlag(id: string): Promise<Flag | null> {
@@ -164,17 +185,68 @@ export class Store {
     await this.db.prepare("UPDATE flags SET status = ? WHERE id = ?").bind(status, id).run();
   }
 
+  /**
+   * Flags with their session and farmer, newest first, in one query. D1's
+   * free plan allows 50 queries per request, so lists never query per row.
+   */
+  async flagRows(filter: { farmerId?: string; since?: string } = {}): Promise<FlagRow[]> {
+    const where: string[] = [];
+    const params: string[] = [];
+    if (filter.farmerId) {
+      where.push("f.farmer_id = ?");
+      params.push(filter.farmerId);
+    }
+    if (filter.since) {
+      where.push("f.raised_at >= ?");
+      params.push(filter.since);
+    }
+    const { results } = await this.db
+      .prepare(
+        `SELECT f.*,
+           s.id AS s_id, s.flag_id AS s_flag_id, s.farmer_id AS s_farmer_id, s.status AS s_status, s.state AS s_state,
+           s.created_at AS s_created_at, s.started_at AS s_started_at, s.last_activity_at AS s_last_activity_at,
+           s.reminded_at AS s_reminded_at, s.completed_at AS s_completed_at, s.report AS s_report,
+           s.recheck_due_at AS s_recheck_due_at,
+           fa.name AS fa_name, fa.farm_name AS fa_farm_name, fa.crop AS fa_crop
+         FROM flags f
+         JOIN farmers fa ON fa.id = f.farmer_id
+         LEFT JOIN sessions s ON s.flag_id = f.id
+         ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+         ORDER BY f.raised_at DESC, f.id`,
+      )
+      .bind(...params)
+      .all<Row>();
+    return results.map((row) => {
+      const pick = (prefix: string) =>
+        Object.fromEntries(Object.entries(row).filter(([k]) => k.startsWith(prefix)).map(([k, v]) => [k.slice(prefix.length), v]));
+      const flagRow = Object.fromEntries(Object.entries(row).filter(([k]) => !/^(s|fa)_/.test(k)));
+      return {
+        flag: toFlag(flagRow),
+        session: row.s_id ? toSession(pick("s_")) : null,
+        farmer: { id: row.farmer_id as string, ...(pick("fa_") as Pick<Farmer, "name" | "farm_name" | "crop">) },
+      };
+    });
+  }
+
   // Sessions
 
   async addSession(session: StoredSession): Promise<void> {
-    await this.db
+    await this.sessionInsert(session).run();
+  }
+
+  /** A flag and its session, written together in one batch. */
+  async addFlagWithSession(flag: Flag, session: StoredSession): Promise<void> {
+    await this.db.batch([this.flagInsert(flag), this.sessionInsert(session)]);
+  }
+
+  private sessionInsert(session: StoredSession): D1PreparedStatement {
+    return this.db
       .prepare(
         `INSERT INTO sessions (id, flag_id, farmer_id, status, state, created_at, started_at, last_activity_at,
            reminded_at, completed_at, report, recheck_due_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .bind(...sessionValues(session))
-      .run();
+      .bind(...sessionValues(session));
   }
 
   async saveSession(session: StoredSession): Promise<void> {
@@ -252,13 +324,26 @@ export class Store {
     return results.map(toSession);
   }
 
+  /** Delete every flag, session, track and message; farmers stay. For demos. */
+  async resetActivity(): Promise<void> {
+    await this.db.batch(["flags", "sessions", "tracks", "messages"].map((table) => this.db.prepare(`DELETE FROM ${table}`)));
+  }
+
   // Messages
 
   async logMessage(message: Omit<Message, "id">): Promise<void> {
-    await this.db
-      .prepare("INSERT INTO messages (farmer_id, direction, channel, body, at) VALUES (?, ?, ?, ?, ?)")
-      .bind(message.farmer_id, message.direction, message.channel, message.body, message.at)
-      .run();
+    await this.logMessages([message]);
+  }
+
+  async logMessages(messages: Omit<Message, "id">[]): Promise<void> {
+    if (!messages.length) return;
+    await this.db.batch(
+      messages.map((m) =>
+        this.db
+          .prepare("INSERT INTO messages (farmer_id, direction, channel, body, at) VALUES (?, ?, ?, ?, ?)")
+          .bind(m.farmer_id, m.direction, m.channel, m.body, m.at),
+      ),
+    );
   }
 
   async listMessages(farmerId: string, limit = 200): Promise<Message[]> {

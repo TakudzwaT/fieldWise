@@ -12,8 +12,8 @@ import { windowMetrics } from "../../api/src/window";
 import type { Hour } from "../../api/src/summarize";
 import type { Conversations } from "./conversation";
 import type { DiseaseId } from "./questionnaires";
-import type { Farmer, FlagDetails, FlagSource, Store } from "./store";
-import { evaluate, severity, type Alert, type Status } from "./trigger";
+import { trackKey, type Farmer, type FlagDetails, type FlagSource, type Store } from "./store";
+import { evaluate, severity, type Alert, type Status, type Track } from "./trigger";
 
 /** Forecast hours ahead that each check looks at. */
 export const CHECK_HOURS = 72;
@@ -69,9 +69,10 @@ export async function runChecks(
   farmers?: Farmer[],
 ): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
+  const tracks = await store.listTracks();
   for (const farmer of farmers ?? (await store.listFarmers())) {
     try {
-      results.push(...(await apply(store, conversations, farmer, await client.assess(farmer), "forecast", now)));
+      results.push(...(await apply(store, conversations, farmer, await client.assess(farmer), "forecast", now, tracks)));
     } catch (err) {
       // One farm failing shouldn't stop the rest; the next run retries it.
       console.error(`Check failed for ${farmer.id}`, err);
@@ -81,7 +82,10 @@ export async function runChecks(
   return results;
 }
 
-/** Put one assessment through the trigger, raising flags where it alerts. */
+/**
+ * Put one assessment through the trigger, raising flags where it alerts. Pass
+ * `tracks` (from store.listTracks) when applying many, to read them once.
+ */
 export async function apply(
   store: Store,
   conversations: Conversations,
@@ -89,12 +93,16 @@ export async function apply(
   assessment: Assessment,
   source: FlagSource,
   now: Date,
+  tracks?: Map<string, Track>,
 ): Promise<CheckResult[]> {
+  const known = tracks ?? (await store.listTracks());
   const out: CheckResult[] = [];
+  const saves: { farmerId: string; disease: DiseaseId; track: Track }[] = [];
   for (const result of assessment.results) {
-    const previous = await store.getTrack(farmer.id, result.disease);
-    const { track, alert } = evaluate(previous, result.status, severity(result.disease, assessment.window), now);
-    await store.saveTrack(farmer.id, result.disease, track, now.toISOString());
+    const key = trackKey(farmer.id, result.disease);
+    const { track, alert } = evaluate(known.get(key), result.status, severity(result.disease, assessment.window), now);
+    known.set(key, track);
+    saves.push({ farmerId: farmer.id, disease: result.disease, track });
     let flag: string | undefined;
     if (alert) {
       const details: FlagDetails = {
@@ -109,6 +117,7 @@ export async function apply(
     }
     out.push({ farmer: farmer.id, disease: result.disease, status: result.status, alert, ...(flag ? { flag } : {}) });
   }
+  await store.saveTracks(saves, now.toISOString());
   return out;
 }
 

@@ -5,9 +5,27 @@ newly favours a crop disease, the farmer is alerted and answers a short yes/no
 questionnaire. Their answers are scored into an outcome for Felix, the
 extension officer.
 
-> **Status:** step 2 of 5. Questionnaires, scoring, the alert trigger, the D1
-> database and the HTTP routes are built and tested, and run locally. The web
-> simulator, Felix's dashboard, WhatsApp and deployment come next.
+> **Status:** step 3 of 5. Everything runs locally: alerts, questionnaires,
+> scoring, the D1 database, the web phone simulator and Felix's live
+> dashboard. WhatsApp and deployment come next.
+
+## The demo
+
+Open `/demo` (or `/`): the farmer's phone on the left, Felix's dashboard on the
+right. Both pages ask for the admin token once and keep it in that browser.
+
+1. **Wet spell** (dashboard, demo controls) runs a made-up wet spell through
+   the real rules. Every farm is flagged and gets an alert.
+2. Answer on the phone, by tapping Yes/No or typing `1`, `2`, `yes`, `inde`.
+3. The dashboard updates every 3 seconds. A questionnaire still being answered
+   is scored on the answers so far and marked *provisional*, so an urgent
+   answer (streak virus, say) jumps to the top before the farmer finishes.
+4. **Dry spell** clears the flags and re-arms the alerts, so the next wet spell
+   fires again. **Reset demo** deletes every flag, answer and message (farmers
+   stay).
+
+`/sim` and `/dashboard` also work on their own; `/sim?farmer=F056` opens one
+farmer.
 
 ## How it decides
 
@@ -76,6 +94,24 @@ configured, every request is refused.
 | `POST /demo/scenario` | Put a made-up `"wet"` or `"dry"` spell through the same rules, for every farmer or one `farmer_id`. Wet raises every flag for the crop; dry clears them, so the next wet spell alerts again. Flags raised this way are marked `source: "scenario"`. |
 | `POST /inbound` | A farmer's message: `phone`, `text`. Returns the replies sent back. Used by the simulator; WhatsApp will feed the same handler. |
 | `POST /sweep` | Run reminders, no-response marks and re-asks now |
+| `GET /felix/priority` | Felix's list: one line per flagged farm, most urgent first, in the document's format (`text`) and as fields. `?days=` sets the window (1-90, default 14). |
+| `GET /felix/summary` | Totals for the same window: farms flagged, response rate, outcomes, wrong-flag rate, flags by disease, and what the answers point to |
+| `POST /demo/reset` | Delete every flag, session, track and message. Needs `{"confirm": "reset"}`. |
+| `GET /demo`, `/dashboard`, `/sim` | The demo pages. They hold no data, so they need no token to load. |
+
+### Felix's priority order
+
+| Rank | When |
+|---|---|
+| Go now | Confirmed and spreading, an urgent wrong flag (bacterial wilt, streak virus), or a provisional answer that is already urgent |
+| Go this week | Confirmed, or a wrong flag, with limited spread |
+| No response: chase | Silent 24 hours after a reminder. A silent farm is not a healthy farm. |
+| Re-check at next forecast | Early signs only |
+| Waiting for answers | Alert sent; nothing worrying answered yet |
+| No action | Answered and clear |
+
+Each farm appears once, under its most urgent flag; its other flags are listed
+under `also`.
 
 ## Demo farmers
 
@@ -84,6 +120,14 @@ The names are invented, and the crops are changed to ones the questionnaires
 cover (tomato, maize, beans, cabbage). Their phone numbers start `+265 0`,
 which no real number does, and their channel is `sim`, so nothing sent to
 them leaves FieldWise.
+
+## Free plan limits
+
+D1's free plan allows 50 queries per request. Lists are read in one joined
+query and writes are batched, so a flag costs about three queries. The demo
+page's wet and dry spells send one request per farm for the same reason. The
+hourly check handles each farm in one run, so a large spell over many farms
+could still reach the limit; Workers Paid ($5/month) raises it to 1,000.
 
 ## Development
 
@@ -131,6 +175,8 @@ curl "http://localhost:8787/__scheduled?cron=15+*+*+*+*"
 | File | What it does |
 |---|---|
 | `src/index.ts` | Routes, auth and the hourly job |
+| `src/felix.ts` | Felix's priority list and summary |
+| `src/pages.ts` | The demo pages: phone simulator, dashboard and `/demo` |
 | `src/checks.ts` | Forecast checks through the weather API, and the demo scenario |
 | `src/trigger.ts` | When a status change alerts |
 | `src/conversation.ts` | Alerts, replies, queueing, reminders and re-asks |

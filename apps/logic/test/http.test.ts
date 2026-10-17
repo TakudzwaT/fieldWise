@@ -74,3 +74,46 @@ describe("http", () => {
     expect(normalizePhone("12345")).toBeNull();
   });
 });
+
+describe("felix and demo routes", () => {
+  it("serves the pages without a token, and no data in them", async () => {
+    const call = client();
+    for (const path of ["/demo", "/dashboard", "/sim"]) {
+      const response = await worker.fetch(new Request(`https://logic.test${path}`), {
+        DB: testDb(),
+        WEATHER_API: "https://weather.invalid",
+        ADMIN_TOKEN: TOKEN,
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toMatch(/text\/html/);
+      expect(response.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'self'");
+      const page = await response.text();
+      expect(page).not.toContain("Banda");
+      expect(page).not.toContain(TOKEN);
+    }
+    expect((await call("GET", "/felix/priority", undefined, null)).status).toBe(401);
+  });
+
+  it("returns the priority list and summary after a scenario", async () => {
+    const call = client();
+    await call("POST", "/demo/scenario", { weather: "wet", farmer_id: "F062" });
+    const priority = await call("GET", "/felix/priority?days=7");
+    expect(priority.body.farms).toHaveLength(1);
+    expect(priority.body.farms[0]).toMatchObject({ rank: "waiting", source: "scenario", farmer: { id: "F062" } });
+    const s = await call("GET", "/felix/summary");
+    expect(s.body).toMatchObject({ days: 14, flags: 2, flagged_farms: 1, scenario_flags: 2 });
+    expect((await call("GET", "/felix/summary?days=0")).status).toBe(400);
+  });
+
+  it("resets the demo only when asked to explicitly", async () => {
+    const call = client();
+    await call("POST", "/demo/scenario", { weather: "wet", farmer_id: "F014" });
+    expect((await call("POST", "/demo/reset", {})).status).toBe(400);
+    expect((await call("POST", "/demo/reset", { confirm: "reset" })).body).toEqual({ reset: true });
+    expect((await call("GET", "/flags")).body.flags).toEqual([]);
+    expect((await call("GET", "/farmers")).body.farmers).toHaveLength(8);
+    // Alerts re-arm after a reset.
+    const again = await call("POST", "/demo/scenario", { weather: "wet", farmer_id: "F014" });
+    expect(again.body.results[0].alert).toBe("new");
+  });
+});

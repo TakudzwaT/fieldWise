@@ -37,5 +37,20 @@ export function testDb(): D1Database {
   const db = new DatabaseSync(":memory:");
   const dir = join(dirname(fileURLToPath(import.meta.url)), "../migrations");
   for (const file of readdirSync(dir).sort()) db.exec(readFileSync(join(dir, file), "utf8"));
-  return { prepare: (sql: string) => new Statement(db, sql) } as unknown as D1Database;
+  return {
+    prepare: (sql: string) => new Statement(db, sql),
+    // D1 runs a batch as one transaction.
+    async batch(statements: Statement[]) {
+      db.exec("BEGIN");
+      try {
+        const results = [];
+        for (const statement of statements) results.push(await statement.run());
+        db.exec("COMMIT");
+        return results;
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
+    },
+  } as unknown as D1Database;
 }

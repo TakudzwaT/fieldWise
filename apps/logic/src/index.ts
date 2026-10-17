@@ -4,15 +4,18 @@
 // flags when conditions change, and sends reminders. Farmers' replies come in
 // through /inbound (the simulator and, later, the WhatsApp webhook).
 //
-// Every route but /health needs the admin token, because the data includes
-// farmers' names and phone numbers.
+// Every data route needs the admin token, because the data includes farmers'
+// names and phone numbers. /health and the pages (/demo, /dashboard, /sim) are
+// open; the pages ask for the token.
 
 import { inBounds } from "../../api/src/cells";
 import { apply, runChecks, scenarioAssessment, weatherApi, type ScenarioWeather } from "./checks";
 import { Conversations, newId } from "./conversation";
+import { priorityList, summary } from "./felix";
+import { dashboardPage, demoPage, simulatorPage } from "./pages";
 import { Outbox } from "./outbox";
 import { CROPS, DISEASES, QUESTIONNAIRES, type Crop, type DiseaseId, type Lang } from "./questionnaires";
-import { Store, type Farmer } from "./store";
+import { Store, type Farmer, type FlagRow } from "./store";
 
 export interface Env {
   DB: D1Database;
@@ -36,6 +39,12 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders() });
     const url = new URL(request.url);
     if (url.pathname === "/health") return json({ status: "ok" });
+    // The pages hold no data; they ask for the admin token and then call the routes below.
+    if (request.method === "GET") {
+      if (url.pathname === "/" || url.pathname === "/demo") return html(demoPage);
+      if (url.pathname === "/dashboard") return html(dashboardPage);
+      if (url.pathname === "/sim") return html(simulatorPage);
+    }
     if (!authorized(request, env)) return error(401, "Missing or wrong admin token.");
     try {
       return await route(request, url, env, app(env));
@@ -64,13 +73,23 @@ async function route(request: Request, url: URL, env: Env, { store, conversation
     if (parts.length === 1 && method === "POST") return addFarmer(request, store, now);
     const farmer = parts[1] ? await store.getFarmer(parts[1]) : null;
     if (!farmer) return error(404, "No farmer with that id.");
-    if (parts.length === 2 && method === "GET") return json({ farmer, flags: await flagsWithSessions(store, farmer.id) });
+    if (parts.length === 2 && method === "GET") return json({ farmer, flags: flagsView(await store.flagRows({ farmerId: farmer.id })) });
     if (parts.length === 3 && parts[2] === "messages" && method === "GET") {
       return json({ farmer: farmer.id, messages: await store.listMessages(farmer.id) });
     }
   }
 
-  if (url.pathname === "/flags" && method === "GET") return json({ flags: await flagsWithSessions(store) });
+  if (url.pathname === "/flags" && method === "GET") return json({ flags: flagsView(await store.flagRows()) });
+
+  if (parts[0] === "felix" && parts.length === 2 && method === "GET") {
+    const days = url.searchParams.has("days") ? Number(url.searchParams.get("days")) : 14;
+    if (!Number.isInteger(days) || days < 1 || days > 90) return error(400, "days must be a whole number from 1 to 90.");
+    const rows = await store.flagRows({ since: new Date(now().getTime() - days * 86_400_000).toISOString() });
+    if (parts[1] === "priority") return json({ days, generated_at: now().toISOString(), farms: priorityList(rows) });
+    if (parts[1] === "summary") {
+      return json({ days, generated_at: now().toISOString(), ...summary(rows, (await store.listFarmers()).length) });
+    }
+  }
 
   if (url.pathname === "/flags" && method === "POST") {
     const body = await readJson(request);
@@ -98,10 +117,19 @@ async function route(request: Request, url: URL, env: Env, { store, conversation
     if (body.farmer_id !== undefined) farmers = farmers.filter((f) => f.id === body.farmer_id);
     if (!farmers.length) return error(404, "No farmer with that id.");
     const results = [];
+    const tracks = await store.listTracks();
     for (const farmer of farmers) {
-      results.push(...(await apply(store, conversations, farmer, scenarioAssessment(farmer, weather, now()), "scenario", now())));
+      results.push(...(await apply(store, conversations, farmer, scenarioAssessment(farmer, weather, now()), "scenario", now(), tracks)));
     }
     return json({ weather, results });
+  }
+
+  if (url.pathname === "/demo/reset" && method === "POST") {
+    const body = await readJson(request);
+    if (body instanceof Response) return body;
+    if (body.confirm !== "reset") return error(400, 'This deletes every flag, answer and message. Send {"confirm": "reset"}.');
+    await store.resetActivity();
+    return json({ reset: true });
   }
 
   if (url.pathname === "/inbound" && method === "POST") {
@@ -148,27 +176,21 @@ async function addFarmer(request: Request, store: Store, now: () => Date): Promi
   return json({ farmer }, 201);
 }
 
-async function flagsWithSessions(store: Store, farmerId?: string) {
-  const flags = await store.listFlags(farmerId);
-  return Promise.all(
-    flags.map(async (flag) => {
-      const session = await store.getSessionByFlag(flag.id);
-      return {
-        ...flag,
-        session: session && {
-          id: session.id,
-          status: session.status,
-          step: session.state.step,
-          answers: session.state.answers,
-          started_at: session.started_at,
-          last_activity_at: session.last_activity_at,
-          reminded_at: session.reminded_at,
-          completed_at: session.completed_at,
-          report: session.report,
-        },
-      };
-    }),
-  );
+function flagsView(rows: FlagRow[]) {
+  return rows.map(({ flag, session }) => ({
+    ...flag,
+    session: session && {
+      id: session.id,
+      status: session.status,
+      step: session.state.step,
+      answers: session.state.answers,
+      started_at: session.started_at,
+      last_activity_at: session.last_activity_at,
+      reminded_at: session.reminded_at,
+      completed_at: session.completed_at,
+      report: session.report,
+    },
+  }));
 }
 
 /** E.164 with a +, or a Malawi number starting 0 (0991234567 -> +265991234567). */
@@ -216,6 +238,19 @@ function json(body: unknown, status = 200): Response {
     status,
     // Farmer data is private and changes with every reply.
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...corsHeaders() },
+  });
+}
+
+function html(body: string): Response {
+  return new Response(body, {
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      // Inline scripts and styles only; nothing loads from elsewhere.
+      "Content-Security-Policy":
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'self'",
+      "Referrer-Policy": "no-referrer",
+    },
   });
 }
 

@@ -18,15 +18,17 @@ export class Outbox {
   ) {}
 
   async send(farmer: Farmer, messages: Outgoing[]): Promise<void> {
-    for (const message of messages) {
-      await this.store.logMessage({
+    const at = this.now().toISOString();
+    await this.store.logMessages(
+      messages.map((message) => ({
         farmer_id: farmer.id,
         direction: "out",
         channel: farmer.channel,
         body: typeof message === "string" ? message : toText(message),
-        at: this.now().toISOString(),
-      });
-      await this.deliverers[farmer.channel]?.(farmer, message);
-    }
+        at,
+      })),
+    );
+    const deliver = this.deliverers[farmer.channel];
+    if (deliver) for (const message of messages) await deliver(farmer, message);
   }
 }

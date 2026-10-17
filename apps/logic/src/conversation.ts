@@ -6,7 +6,7 @@
 // Housekeeping (sweep) runs on the cron: one reminder after 24 h of silence,
 // "no response" 24 h after that, and black rot's re-ask a week after a clear.
 
-import { render, reply, start, toText, type Prompt } from "./engine";
+import { render, reply, start, toText } from "./engine";
 import { alertText, noQuestionsText, nudgeText, NOT_REGISTERED, reminderText } from "./messages";
 import type { Outbox, Outgoing } from "./outbox";
 import type { DiseaseId } from "./questionnaires";
@@ -42,23 +42,24 @@ export class Conversations {
       }
     }
 
-    await this.store.addFlag(flag);
+    // Starts now if the farmer has nothing else open; otherwise it waits.
+    const startsNow = !(await this.store.activeSession(farmer.id));
     const session: StoredSession = {
       id: newId("ses"),
       flag_id: flag.id,
       farmer_id: farmer.id,
-      status: "queued",
+      status: startsNow ? "active" : "queued",
       state: start(disease, farmer.lang).session,
       created_at: at,
-      started_at: null,
-      last_activity_at: null,
+      started_at: startsNow ? at : null,
+      last_activity_at: startsNow ? at : null,
       reminded_at: null,
       completed_at: null,
       report: null,
       recheck_due_at: null,
     };
-    await this.store.addSession(session);
-    if (!(await this.store.activeSession(farmer.id))) await this.activate(farmer, session, reason);
+    await this.store.addFlagWithSession(flag, session);
+    if (startsNow) await this.outbox.send(farmer, [alertText(reason, farmer.crop, farmer.lang), render(session.state)]);
     return flag;
   }
 
@@ -98,7 +99,7 @@ export class Conversations {
 
     const replies: Outgoing[] = [turn.prompt];
     const next = await this.store.nextQueued(farmer.id);
-    if (next) replies.push(...(await this.begin(farmer, next, "new")));
+    if (next) replies.push(...(await this.begin(farmer, next)));
     return this.send(farmer, replies);
   }
 
@@ -137,12 +138,8 @@ export class Conversations {
     return { reminded, noResponse, rechecks };
   }
 
-  private async activate(farmer: Farmer, session: StoredSession, reason: FlagReason): Promise<void> {
-    await this.outbox.send(farmer, await this.begin(farmer, session, reason));
-  }
-
-  /** Mark a session active and return its opening messages. */
-  private async begin(farmer: Farmer, session: StoredSession, reason: FlagReason): Promise<Outgoing[]> {
+  /** Start a queued session and return its opening messages. */
+  private async begin(farmer: Farmer, session: StoredSession): Promise<Outgoing[]> {
     const at = this.now().toISOString();
     // The farmer may have picked a language since this session was queued.
     if (!session.state.lang && farmer.lang) session.state.lang = farmer.lang;
@@ -151,8 +148,7 @@ export class Conversations {
     session.last_activity_at = at;
     await this.store.saveSession(session);
     const flag = await this.store.getFlag(session.flag_id);
-    const prompt: Prompt = render(session.state);
-    return [alertText(flag?.reason ?? reason, farmer.crop, farmer.lang), prompt];
+    return [alertText(flag?.reason ?? "new", farmer.crop, farmer.lang), render(session.state)];
   }
 
   private async send(farmer: Farmer, messages: Outgoing[]): Promise<string[]> {
