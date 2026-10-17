@@ -5,9 +5,10 @@ newly favours a crop disease, the farmer is alerted and answers a short yes/no
 questionnaire. Their answers are scored into an outcome for Felix, the
 extension officer.
 
-> **Status:** step 3 of 5. Everything runs locally: alerts, questionnaires,
-> scoring, the D1 database, the web phone simulator and Felix's live
-> dashboard. WhatsApp and deployment come next.
+> **Status:** step 4 of 5. Everything runs locally: alerts, questionnaires,
+> scoring, the D1 database, the web phone simulator, Felix's live dashboard,
+> and WhatsApp (tested against simulated Meta calls). Deployment comes next;
+> WhatsApp needs it, because Meta must reach the Worker over HTTPS.
 
 ## The demo
 
@@ -75,6 +76,42 @@ in past seasons" means an infested field (rotation and liming, not a spray).
 A spell that gets worse while its questionnaire is still open doesn't restart
 it. The farmer gets a nudge to finish, and the new flag is stored as `merged`.
 
+## WhatsApp
+
+Setup, step by step: [docs/whatsapp-setup.md](docs/whatsapp-setup.md).
+
+- Questions arrive with **Yes/No buttons**; the crop and progress ("Your maize
+  · 3 of 8") are the header. Typed `1`, `2`, `yes`, `inde` still work.
+- A phone that isn't registered can text `join <crop>` (`tomato`, `maize`,
+  `beans`, `cabbage`, or the Chichewa names) when `WHATSAPP_OPEN_JOIN` is
+  `true`. It is registered near Kasungu under its WhatsApp profile name.
+- A greeting (`hi`, `moni`), a voice note or photo, or a template's **Start**
+  button shows the current question again rather than counting as a wrong
+  answer.
+- WhatsApp only allows these messages within 24 hours of the farmer's last
+  message. Outside that, delivery fails with code 131047. If `WHATSAPP_TEMPLATE`
+  is set, FieldWise sends that template instead, at most once a day per
+  farmer.
+- Delivery receipts (sent, delivered, read, failed) are stored on each message
+  and shown as ticks in `/sim`, which mirrors a WhatsApp farmer's chat.
+- Webhook calls are refused unless signed with the app secret
+  (`X-Hub-Signature-256`). Meta retries webhooks, so each message is handled
+  once.
+
+| Setting | Secret? | What it is |
+|---|---|---|
+| `WHATSAPP_PHONE_NUMBER_ID` | | Meta's id for the sending number |
+| `WHATSAPP_TOKEN` | yes | System-user access token |
+| `WHATSAPP_APP_SECRET` | yes | Checks webhook signatures |
+| `WHATSAPP_VERIFY_TOKEN` | yes | Any random string, for Meta's webhook check |
+| `WHATSAPP_OPEN_JOIN` | | `true` to let phones join by texting `join <crop>` |
+| `WHATSAPP_TEMPLATE` | | Template name for messages after 24 hours, e.g. `fieldwise_check` |
+| `WHATSAPP_TEMPLATE_LANG` | | Its language code (default `en`) |
+| `WHATSAPP_API_VERSION` | | Graph API version (default `v25.0`) |
+
+Set each with `npx wrangler secret put <NAME>`. Without a token and phone
+number id, WhatsApp farmers' messages are logged as failed and nothing is sent.
+
 ## Routes
 
 Every route except `/health` needs `Authorization: Bearer <ADMIN_TOKEN>`,
@@ -98,6 +135,7 @@ configured, every request is refused.
 | `GET /felix/summary` | Totals for the same window: farms flagged, response rate, outcomes, wrong-flag rate, flags by disease, and what the answers point to |
 | `POST /demo/reset` | Delete every flag, session, track and message. Needs `{"confirm": "reset"}`. |
 | `GET /demo`, `/dashboard`, `/sim` | The demo pages. They hold no data, so they need no token to load. |
+| `GET /whatsapp`, `POST /whatsapp` | Meta's webhook. Checked by verify token and signature, not the admin token. |
 
 ### Felix's priority order
 
@@ -185,8 +223,11 @@ curl "http://localhost:8787/__scheduled?cron=15+*+*+*+*"
 | `src/scoring.ts` | Answers to an outcome for Felix |
 | `src/messages.ts` | Alert, reminder and other farmer-facing text |
 | `src/outbox.ts` | Logs and delivers outgoing messages |
+| `src/whatsapp.ts` | WhatsApp webhook, delivery, joining and the template fallback |
+| `src/phone.ts` | Phone number normalising |
 | `src/store.ts` | D1 reads and writes |
-| `migrations/` | Schema and demo farmers |
+| `migrations/` | Schema, demo farmers, and WhatsApp delivery status |
+| `docs/whatsapp-setup.md` | Setting up Meta's WhatsApp test number |
 
 `src/checks.ts` imports the decision tree from `../api/src/assess.ts`, so the
 scenario uses exactly the weather API's rules.

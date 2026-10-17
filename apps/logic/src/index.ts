@@ -15,9 +15,25 @@ import { priorityList, summary } from "./felix";
 import { dashboardPage, demoPage, simulatorPage } from "./pages";
 import { Outbox } from "./outbox";
 import { CROPS, DISEASES, QUESTIONNAIRES, type Crop, type DiseaseId, type Lang } from "./questionnaires";
+import { normalizePhone } from "./phone";
 import { Store, type Farmer, type FlagRow } from "./store";
+import {
+  WhatsAppError,
+  OUTSIDE_WINDOW,
+  constantTimeEqual,
+  parseWebhook,
+  processWebhook,
+  templateFallback,
+  validSignature,
+  verifySubscription,
+  whatsappConfig,
+  whatsappDeliver,
+  type WhatsAppEnv,
+} from "./whatsapp";
 
-export interface Env {
+export { normalizePhone };
+
+export interface Env extends WhatsAppEnv {
   DB: D1Database;
   WEATHER_API: string;
   ADMIN_TOKEN?: string;
@@ -27,18 +43,30 @@ interface App {
   store: Store;
   conversations: Conversations;
   now: () => Date;
+  whatsapp: ReturnType<typeof whatsappConfig>;
 }
 
-function app(env: Env, now: () => Date = () => new Date()): App {
+function app(env: Env, now: () => Date = () => new Date(), fetchFn: typeof fetch = fetch): App {
   const store = new Store(env.DB);
-  return { store, conversations: new Conversations(store, new Outbox(store, now), now), now };
+  const whatsapp = whatsappConfig(env);
+  const outbox = new Outbox(
+    store,
+    now,
+    whatsapp ? { whatsapp: whatsappDeliver(whatsapp, fetchFn) } : {},
+    async (farmer, err) => {
+      if (err instanceof WhatsAppError && err.code === OUTSIDE_WINDOW) await templateFallback(whatsapp, store, farmer, now(), fetchFn);
+    },
+  );
+  return { store, conversations: new Conversations(store, outbox, now), now, whatsapp };
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders() });
     const url = new URL(request.url);
     if (url.pathname === "/health") return json({ status: "ok" });
+    // Meta calls this; it is checked by signature, not the admin token.
+    if (url.pathname === "/whatsapp") return whatsappRoute(request, url, env, ctx);
     // The pages hold no data; they ask for the admin token and then call the routes below.
     if (request.method === "GET") {
       if (url.pathname === "/" || url.pathname === "/demo") return html(demoPage);
@@ -145,6 +173,30 @@ async function route(request: Request, url: URL, env: Env, { store, conversation
   return error(404, "Not found.");
 }
 
+async function whatsappRoute(request: Request, url: URL, env: Env, ctx?: ExecutionContext): Promise<Response> {
+  if (request.method === "GET") return verifySubscription(url, env.WHATSAPP_VERIFY_TOKEN);
+  if (request.method !== "POST") return error(405, "Use GET or POST.");
+  if (!env.WHATSAPP_APP_SECRET) return error(503, "WhatsApp is not configured.");
+  const raw = await request.text();
+  if (!(await validSignature(raw, request.headers.get("X-Hub-Signature-256"), env.WHATSAPP_APP_SECRET))) {
+    return error(401, "Bad signature.");
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    return error(400, "Send JSON.");
+  }
+  const { store, conversations, now, whatsapp } = app(env);
+  const work = processWebhook(parseWebhook(body), { store, conversations, config: whatsapp, openJoin: env.WHATSAPP_OPEN_JOIN === "true", now }).catch(
+    (err) => console.error("WhatsApp webhook failed", err),
+  );
+  // Answer Meta at once; it retries anything slow.
+  if (ctx) ctx.waitUntil(work);
+  else await work;
+  return new Response("ok");
+}
+
 async function addFarmer(request: Request, store: Store, now: () => Date): Promise<Response> {
   const body = await readJson(request);
   if (body instanceof Response) return body;
@@ -193,26 +245,11 @@ function flagsView(rows: FlagRow[]) {
   }));
 }
 
-/** E.164 with a +, or a Malawi number starting 0 (0991234567 -> +265991234567). */
-export function normalizePhone(raw: string): string | null {
-  const digits = raw.replace(/[\s()-]/g, "");
-  const phone = /^0\d{9}$/.test(digits) ? `+265${digits.slice(1)}` : digits;
-  return /^\+\d{8,15}$/.test(phone) ? phone : null;
-}
-
 function authorized(request: Request, env: Env): boolean {
   // No token configured means no access, not open access.
   if (!env.ADMIN_TOKEN) return false;
   const given = request.headers.get("Authorization")?.replace(/^Bearer\s+/i, "") ?? "";
   return constantTimeEqual(given, env.ADMIN_TOKEN);
-}
-
-function constantTimeEqual(a: string, b: string): boolean {
-  const x = new TextEncoder().encode(a);
-  const y = new TextEncoder().encode(b);
-  let diff = x.length ^ y.length;
-  for (let i = 0; i < Math.max(x.length, y.length); i++) diff |= (x[i] ?? 0) ^ (y[i] ?? 0);
-  return diff === 0;
 }
 
 async function readJson(request: Request): Promise<Record<string, unknown> | Response> {

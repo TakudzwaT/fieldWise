@@ -176,6 +176,8 @@ body { min-height: 100vh; display: grid; place-items: start center; padding: 16p
 .bubble.out { align-self: flex-start; background: var(--bubble-out); border-top-left-radius: 4px; }
 .bubble.in { align-self: flex-end; background: var(--bubble-in); border-top-right-radius: 4px; }
 .bubble small { display: block; font-size: 11px; color: var(--muted); text-align: right; margin-top: 2px; }
+.bubble.failed { outline: 1.5px solid var(--red); }
+.bubble small.err { color: var(--red); text-align: left; }
 .bubble .cap { display: block; font-size: 12px; font-weight: 600; color: var(--primary); margin-bottom: 2px; }
 .empty { margin: auto; text-align: center; color: var(--muted); font-size: 14px; padding: 24px; }
 .quick { display: flex; gap: 8px; padding: 8px 12px 0; flex-wrap: wrap; }
@@ -194,17 +196,20 @@ body { min-height: 100vh; display: grid; place-items: start center; padding: 16p
     <div class="quick" id="quick"></div>
     <form class="compose" id="compose"><input type="text" id="text" placeholder="Type 1, 2, yes, inde…" autocomplete="off" aria-label="Reply"><button type="submit" aria-label="Send">➤</button></form>
   </div></div>
-  <p class="note">Simulated phone. Messages here never leave FieldWise.</p>
+  <p class="note" id="note">Simulated phone. Messages here never leave FieldWise.</p>
 </main>`,
   `
 var farmers = [], current = null, lastCount = -1, sending = false;
+var TICKS = { sent: "✓", delivered: "✓✓", read: "✓✓ read" };
 var select = document.getElementById("farmer");
 var thread = document.getElementById("thread");
 var quick = document.getElementById("quick");
 
 function render(messages) {
-  if (messages.length === lastCount) return;
-  lastCount = messages.length;
+  // Redraw when a message arrives or a delivery tick changes.
+  var key = messages.length + ":" + messages.map(function (m) { return m.status || ""; }).join(",");
+  if (key === lastCount) return;
+  lastCount = key;
   thread.textContent = "";
   if (!messages.length) {
     append(thread, el("div", { class: "empty" }, "No messages yet.", el("br"), "Raise a flag from the dashboard, or send a message."));
@@ -213,7 +218,11 @@ function render(messages) {
     var lines = m.body.split("\\n");
     var cap = /·\\s\\d+\\s(of|mwa)\\s8$/.test(lines[0]) ? lines.shift() : null;
     var time = new Date(m.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    append(thread, el("div", { class: "bubble " + m.direction }, cap && el("span", { class: "cap" }, cap), lines.join("\\n"), el("small", {}, time)));
+    var tick = TICKS[m.status] || "";
+    append(thread, el("div", { class: "bubble " + m.direction + (m.status === "failed" ? " failed" : "") },
+      cap && el("span", { class: "cap" }, cap), lines.join("\\n"),
+      el("small", {}, time + (tick ? " " + tick : "")),
+      m.status === "failed" && el("small", { class: "err" }, "Not delivered: " + (m.error || "unknown error"))));
   });
   thread.scrollTop = thread.scrollHeight;
   quick.textContent = "";
@@ -243,7 +252,10 @@ function choose(id) {
   if (!current) return;
   store("fieldwise-sim-farmer", current.id);
   select.value = current.id;
-  document.getElementById("sub").textContent = current.name + " · " + current.crop;
+  document.getElementById("sub").textContent = current.name + " · " + current.crop + (current.channel === "whatsapp" ? " · WhatsApp" : "");
+  document.getElementById("note").textContent = current.channel === "whatsapp"
+    ? "Mirror of this farmer's real WhatsApp chat. Replies typed here go to FieldWise as theirs."
+    : "Simulated phone. Messages here never leave FieldWise.";
   lastCount = -1;
   refresh();
 }

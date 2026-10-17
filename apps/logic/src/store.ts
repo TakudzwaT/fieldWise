@@ -62,6 +62,8 @@ export interface StoredSession {
   recheck_due_at: string | null;
 }
 
+export type DeliveryStatus = "sent" | "delivered" | "read" | "failed";
+
 export interface Message {
   id: number;
   farmer_id: string;
@@ -69,6 +71,9 @@ export interface Message {
   channel: string;
   body: string;
   at: string;
+  status?: DeliveryStatus | null;
+  error?: string | null;
+  provider_id?: string | null;
 }
 
 export interface FlagRow {
@@ -340,10 +345,40 @@ export class Store {
     await this.db.batch(
       messages.map((m) =>
         this.db
-          .prepare("INSERT INTO messages (farmer_id, direction, channel, body, at) VALUES (?, ?, ?, ?, ?)")
-          .bind(m.farmer_id, m.direction, m.channel, m.body, m.at),
+          .prepare("INSERT INTO messages (farmer_id, direction, channel, body, at, status, error, provider_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+          .bind(m.farmer_id, m.direction, m.channel, m.body, m.at, m.status ?? null, m.error ?? null, m.provider_id ?? null),
       ),
     );
+  }
+
+  /**
+   * Record a delivery receipt. Receipts can arrive out of order, so a status
+   * only moves forward (sent, delivered, read); failed always wins.
+   */
+  async setDeliveryStatus(providerId: string, status: DeliveryStatus, error: string | null): Promise<Message | null> {
+    const rank = (column: string) => `CASE ${column} WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 WHEN 'failed' THEN 4 ELSE 0 END`;
+    await this.db
+      .prepare(
+        `UPDATE messages SET status = ?1, error = COALESCE(?2, error)
+         WHERE provider_id = ?3 AND (?1 = 'failed' OR ${rank("status")} < ${rank("?1")})`,
+      )
+      .bind(status, error, providerId)
+      .run();
+    return this.db.prepare("SELECT * FROM messages WHERE provider_id = ?").bind(providerId).first<Message>();
+  }
+
+  /** The farmer's most recent message whose body starts with `prefix`, sent since `since`. */
+  async lastMessageLike(farmerId: string, prefix: string, since: string): Promise<Message | null> {
+    return this.db
+      .prepare("SELECT * FROM messages WHERE farmer_id = ? AND direction = 'out' AND body LIKE ? AND at >= ? ORDER BY id DESC LIMIT 1")
+      .bind(farmerId, `${prefix}%`, since)
+      .first<Message>();
+  }
+
+  /** True the first time an inbound WhatsApp message id is seen. */
+  async markSeen(providerId: string, at: string): Promise<boolean> {
+    const result = await this.db.prepare("INSERT OR IGNORE INTO whatsapp_seen (id, at) VALUES (?, ?)").bind(providerId, at).run();
+    return result.meta.changes > 0;
   }
 
   async listMessages(farmerId: string, limit = 200): Promise<Message[]> {

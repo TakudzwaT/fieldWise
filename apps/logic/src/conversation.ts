@@ -16,6 +16,8 @@ import type { Farmer, Flag, FlagDetails, FlagReason, FlagSource, Store, StoredSe
 const DAY_MS = 24 * 60 * 60 * 1000;
 export const REMIND_AFTER_MS = DAY_MS;
 export const NO_RESPONSE_AFTER_MS = DAY_MS;
+// The empty string is a message with no text (a voice note, photo or sticker).
+const RESUME = new Set(["", "start", "hi", "hello", "hey", "menu", "resume", "continue", "yambani", "moni", "moniwa"]);
 
 export class Conversations {
   constructor(
@@ -72,6 +74,14 @@ export class Conversations {
 
     const session = await this.store.activeSession(farmer.id);
     if (!session) return this.send(farmer, [noQuestionsText(farmer.lang)]);
+
+    // A greeting, a template's Start button, or a voice note or photo: show the
+    // current screen again rather than counting it as a wrong answer.
+    if (RESUME.has(text.trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ""))) {
+      session.last_activity_at = at;
+      await this.store.saveSession(session);
+      return this.send(farmer, [render(session.state)]);
+    }
 
     const turn = reply(session.state, text);
     session.state = turn.session;
