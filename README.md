@@ -38,16 +38,13 @@ Felix is an extension officer in Kasungu, Malawi. Across Malawi there is about [
 
 Each confirmed or ruled-out check-in becomes a labelled example. The pilot uses them to tune the weather thresholds to [published grey leaf spot models](https://www.apsnet.org/publications/plantdisease/2002/October/Pages/86_10_1127.aspx) and fit them to Kasungu, so the risk model improves with every answer.
 
-## How it scores against the judging criteria
-
-| Criterion | Evidence | Principles |
-|---|---|---|
-| Topic | Targets one hunger driver, maize leaf blight in a maize-staple district; impact is measured in kg and months of food | P9 |
-| Innovation | Weather-driven disease risk sets off automatic farmer check-ins, and the check-ins re-rank a human officer's plan | P6 |
-| Feasibility | Risk engine runs on the phone, forecast and map are bundled offline, farmers need only a basic phone | P2, P4, P5 |
-| Deployability | Consent switch turns check-ins on or off, farmer data stays on the device, and the pilot metrics above are already chosen | P3, P7, P8, P9 |
-| Tech | Flutter app, pure-Dart engine, `flutter test test/felix`: **15/15 passing** | |
-| Pitch | Live loop: start → check-in sent → farmer answers → farm jumps to the top of the plan | |
+| Criterion | Evidence |
+|---|---|
+| **Topic:** measurable impact on food security | ≈180 kg maize saved per farm caught early |
+| **Innovation:** AI and automation at its core | Weather model auto-checks farmers, then reranks Felix's day |
+| **Feasibility:** fits field reality on cost, upkeep and training | Runs offline; farmers need only a basic phone, no data |
+| **Deployability:** ownership, upkeep and scale-up clear | Consent switch, on-device data, pilot metrics chosen |
+| **Tech:** robust build with edge cases handled | 15/15 tests: wrong flag, other crop, consent off |
 
 ## Repo
 
