@@ -544,7 +544,7 @@ body { min-height: 100vh; display: grid; place-items: start center; padding: 16p
       <div class="pad" id="pad"></div>
     </div>
   </div>
-  <div class="quick"><button class="btn primary" type="button" id="quick-dial"></button><button class="btn" type="button" id="quick-sms">Messages</button></div>
+  <div class="quick"><button class="btn primary" type="button" id="quick-wet">Wet spell</button><button class="btn" type="button" id="quick-dial"></button><button class="btn" type="button" id="quick-sms">Messages</button></div>
   <p class="note" id="note">Simulated keypad phone. USSD and SMS here never leave FieldWise.</p>
 </main>`,
   `
@@ -726,6 +726,21 @@ document.getElementById("quick-dial").addEventListener("click", function () {
   if (!current || busy) return;
   clearTimeout(timer);
   startUssd();
+});
+// One tap for a presenter: clear the demo, run a wet spell on this farm, and
+// open the pushed session on the phone at once.
+document.getElementById("quick-wet").addEventListener("click", function () {
+  if (!current || busy) return;
+  var b = this;
+  b.disabled = true;
+  clearTimeout(timer);
+  session = null; view = "wait"; draw();
+  api("/demo/reset", { confirm: "reset" }).then(function () {
+    return api("/demo/scenario", { weather: "wet", farmer_id: current.id });
+  }).then(function () { view = "idle"; draw(); refresh(); }).catch(function (e) {
+    toast(e.message);
+    view = "idle"; draw();
+  }).then(function () { b.disabled = false; });
 });
 document.getElementById("quick-sms").addEventListener("click", function () {
   if (!current || busy) return;
