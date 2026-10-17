@@ -544,8 +544,6 @@ body { min-height: 100vh; display: grid; place-items: start center; padding: 16p
       <div class="pad" id="pad"></div>
     </div>
   </div>
-  <div class="quick"><button class="btn primary" type="button" id="quick-wet">Wet spell</button><button class="btn" type="button" id="quick-dial"></button><button class="btn" type="button" id="quick-sms">Messages</button></div>
-  <p class="note" id="note">Simulated keypad phone. USSD and SMS here never leave FieldWise.</p>
 </main>`,
   `
 var CODE = "*384*123#";
@@ -555,7 +553,6 @@ var farmers = [], current = null, view = "idle", dialed = "", input = "", screen
 var sms = [], readAt = 0, lastSmsId = null, lastPushId = null, timer = null, busy = false;
 var select = document.getElementById("farmer");
 var viewEl = document.getElementById("view");
-document.getElementById("quick-dial").textContent = "Dial " + CODE;
 
 function soft(l, c, r) {
   document.getElementById("soft-l").textContent = l || "";
@@ -722,17 +719,11 @@ document.addEventListener("keydown", function (e) {
   if (b) { b.classList.add("down"); setTimeout(function () { b.classList.remove("down"); }, 120); }
   press(k);
 });
-document.getElementById("quick-dial").addEventListener("click", function () {
+// Opened on its own, the phone starts the demo: it clears it, runs a wet
+// spell on the farm shown, and opens the pushed session straight away. In
+// /demo's pane the top bar's buttons do that instead.
+function startDemo() {
   if (!current || busy) return;
-  clearTimeout(timer);
-  startUssd();
-});
-// One tap for a presenter: clear the demo, run a wet spell on this farm, and
-// open the pushed session on the phone at once.
-document.getElementById("quick-wet").addEventListener("click", function () {
-  if (!current || busy) return;
-  var b = this;
-  b.disabled = true;
   clearTimeout(timer);
   session = null; view = "wait"; draw();
   api("/demo/reset", { confirm: "reset" }).then(function () {
@@ -740,12 +731,8 @@ document.getElementById("quick-wet").addEventListener("click", function () {
   }).then(function () { view = "idle"; draw(); refresh(); }).catch(function (e) {
     toast(e.message);
     view = "idle"; draw();
-  }).then(function () { b.disabled = false; });
-});
-document.getElementById("quick-sms").addEventListener("click", function () {
-  if (!current || busy) return;
-  view = "inbox"; readAt = 0; markRead(); draw();
-});
+  });
+}
 
 function refresh() {
   if (!current) return;
@@ -780,7 +767,6 @@ function choose(id) {
   select.value = current.id;
   clearTimeout(timer);
   view = "idle"; session = null; input = ""; dialed = ""; sms = []; lastSmsId = null; lastPushId = null;
-  document.getElementById("note").textContent = "Simulated keypad phone for " + current.name + ". USSD and SMS here never leave FieldWise.";
   draw();
   refresh();
 }
@@ -794,6 +780,7 @@ gate(function () {
       append(select, el("option", { value: f.id }, f.name + " · " + (f.channel === "ussd" ? "keypad phone" : "WhatsApp")));
     });
     choose(new URLSearchParams(location.search).get("farmer") || store("fieldwise-sim-farmer"));
+    if (window.top === window) startDemo();
     setInterval(refresh, 1500);
   }).catch(function (e) { toast(e.message); });
 });
