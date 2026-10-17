@@ -462,10 +462,11 @@ gate(function () {
 `,
 );
 
-// A basic keypad phone, for the 9 in 10 farmers without a smartphone. Dial
-// the FieldWise code to answer questions or use the menu (USSD, through the
-// same /ussd route Africa's Talking calls); alerts and Felix's messages
-// arrive as SMS. The screen holds what a real USSD screen does, and a session
+// A basic keypad phone, for the 9 in 10 farmers without a smartphone. An
+// alert opens a USSD session on the phone by itself (a push), with the first
+// question on screen; replies go through the same /ussd route Africa's
+// Talking calls. Dialling the FieldWise code opens the menu. Felix's messages,
+// and the reminder after a missed push, arrive as SMS. The screen holds what a real USSD screen does, and a session
 // left idle times out, as networks do.
 export const featurePhonePage = page(
   "FieldWise Feature Phone",
@@ -551,7 +552,7 @@ var CODE = "*384*123#";
 var TIMEOUT_MS = 120000;
 var KEYS = [["1", ""], ["2", "abc"], ["3", "def"], ["4", "ghi"], ["5", "jkl"], ["6", "mno"], ["7", "pqrs"], ["8", "tuv"], ["9", "wxyz"], ["*", "+"], ["0", "_"], ["#", ""]];
 var farmers = [], current = null, view = "idle", dialed = "", input = "", screen = "", session = null, inputs = [];
-var sms = [], readAt = 0, lastSmsId = null, timer = null, busy = false;
+var sms = [], readAt = 0, lastSmsId = null, lastPushId = null, timer = null, busy = false;
 var select = document.getElementById("farmer");
 var viewEl = document.getElementById("view");
 document.getElementById("quick-dial").textContent = "Dial " + CODE;
@@ -644,6 +645,19 @@ function ussd(text) {
   });
 }
 
+/** A session FieldWise opened on the phone: show it at once, as networks do. */
+function openPush(m) {
+  if (busy) return;
+  clearTimeout(timer);
+  session = m.provider_id;
+  inputs = []; input = ""; dialed = "";
+  screen = m.body;
+  view = "ussd";
+  buzz();
+  resetTimer();
+  draw();
+}
+
 function startUssd() {
   session = "sim_" + Math.random().toString(36).slice(2, 12);
   inputs = [];
@@ -727,6 +741,13 @@ function refresh() {
     var newest = sms.length ? sms[sms.length - 1].id : 0;
     if (lastSmsId !== null && newest > lastSmsId) buzz();
     lastSmsId = newest;
+    var pushes = d.messages.filter(function (m) { return m.direction === "out" && m.kind === "ussd" && m.provider_id && m.provider_id.indexOf("push_") === 0; });
+    var push = pushes.length ? pushes[pushes.length - 1] : null;
+    var pushId = push ? push.id : 0;
+    // A push from the last minute is still ringing when the page opens.
+    var fresh = lastPushId === null ? push && Date.now() - Date.parse(push.at) < 60000 : pushId > lastPushId;
+    lastPushId = pushId;
+    if (fresh) return openPush(push);
     if (view === "idle") draw();
     if (view === "inbox") markRead();
   }).catch(function () {});
@@ -743,7 +764,7 @@ function choose(id) {
   store("fieldwise-sim-farmer", current.id);
   select.value = current.id;
   clearTimeout(timer);
-  view = "idle"; session = null; input = ""; dialed = ""; sms = []; lastSmsId = null;
+  view = "idle"; session = null; input = ""; dialed = ""; sms = []; lastSmsId = null; lastPushId = null;
   document.getElementById("note").textContent = "Simulated keypad phone for " + current.name + ". USSD and SMS here never leave FieldWise.";
   draw();
   refresh();
@@ -891,7 +912,7 @@ function visit(f) {
       on: { click: function () { openId = openId === f.flag_id ? null : f.flag_id; node.classList.toggle("open"); } } },
     el("div", { class: "top" }, el("b", {}, shortName(f.farmer.name)), el("span", { class: "crop" }, cap(f.crop)), el("span", { class: "chip " + f.rank }, RANK_LABEL[f.rank])),
     why,
-    el("div", { class: "state" }, f.source === "farmer" ? "Farmer reported this · " + state : state)));
+    el("div", { class: "state" }, (f.farmer.ward ? f.farmer.ward + " ward · " : "") + (f.source === "farmer" ? "Farmer reported this · " + state : state))));
   append(node, [
     f.also.length > 0 && el("div", { class: "state" }, "Also: " + f.also.map(function (a) {
       return cap(a.crop) + ": " + a.flagged + (a.state === "answered" ? " (answered)" : a.state === "answering" ? " (answering)" : "");
@@ -1198,6 +1219,7 @@ function card(f) {
       el("span", { class: "name" }, shortName(f.farmer.name)),
       el("span", { class: "tag" }, cap(f.crop)),
       f.farmer.farm_name && el("span", { class: "farm" }, f.farmer.farm_name),
+      f.farmer.ward && el("span", { class: "tag" }, f.farmer.ward + " ward"),
       f.source === "scenario" && el("span", { class: "tag" }, "Scenario"),
       f.source === "farmer" && el("span", { class: "tag" }, "Farmer report"),
       el("span", { class: "chip " + f.rank }, RANK_LABEL[f.rank])),
@@ -1321,7 +1343,7 @@ var ACTIONS = {
     });
   },
   sweep: function () {
-    return api("/sweep", {}).then(function (d) { toast(d.reminded + " reminded, " + d.noResponse + " marked no response, " + d.rechecks + " re-asked."); });
+    return api("/sweep", {}).then(function (d) { toast(d.reminded + " reminded, " + d.pushFallbacks + " texted after a missed push, " + d.noResponse + " marked no response, " + d.rechecks + " re-asked."); });
   },
   reset: function () {
     if (!confirm("Delete every flag, answer and message? Farmers stay.")) return Promise.resolve();

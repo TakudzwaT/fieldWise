@@ -266,6 +266,56 @@ export function inboxPrompt(body: string, hasOlder: boolean, lang: Lang): Prompt
   return { key: "inbox", body, options };
 }
 
+/**
+ * The wards farmers pick from. Placeholders: ten places around Kasungu
+ * district, to be replaced with the official ward list for Felix's area.
+ */
+export const WARDS = [
+  "Kasungu Boma",
+  "Chulu",
+  "Santhe",
+  "Kaluluma",
+  "Chamama",
+  "Mtunthama",
+  "Bua",
+  "Lisasadzi",
+  "Kapelula",
+  "Nkhamenya",
+] as const;
+
+const WARD_ASK: Text = { en: "Which ward is your farm in?", ny: "Kodi munda wanu uli m'dera liti?" };
+
+/** "Which ward is your farm in?", the first question after the language. */
+export function wardPrompt(lang: Lang, retry = false): Prompt {
+  return {
+    key: "ward",
+    body: retry ? `${NUMBER_RETRY[lang]}\n${WARD_ASK[lang]}` : WARD_ASK[lang],
+    options: WARDS.map((ward, i) => ({ reply: String(i + 1), label: ward })),
+  };
+}
+
+/** The ward a reply picks: its number or its name. */
+export function parseWard(input: string): string | null {
+  const word = normalize(input);
+  const n = Number(word);
+  if (Number.isInteger(n) && n >= 1 && n <= WARDS.length) return WARDS[n - 1];
+  return WARDS.find((w) => normalize(w) === word) ?? null;
+}
+
+/** What a pushed USSD screen starts with when the full alert won't fit. */
+const PUSH_INTRO: Text = {
+  en: "FieldWise: this week's weather can harm your crops.",
+  ny: "FieldWise: nyengo ya sabata ino ikhoza kuwononga mbewu zanu.",
+};
+export const pushIntroText = (lang: Lang | null) => (lang ? PUSH_INTRO[lang] : "FieldWise: weather alert / chenjezo la nyengo");
+
+const PUSH_MISSED: Text = {
+  en: `FieldWise: we tried to reach you about your crops. Dial ${USSD_CODE} to answer.`,
+  ny: `FieldWise: tinayesa kukupezani za mbewu zanu. Imbani ${USSD_CODE} kuti muyankhe.`,
+};
+/** The SMS after a pushed USSD session nobody answered. */
+export const pushMissedText = (lang: Lang | null) => say((l) => PUSH_MISSED[l], lang);
+
 /** The "0 Menu" line under a question on USSD. */
 export const menuOption = (lang: Lang) => ({ reply: "0", label: lang === "en" ? "Menu" : "Menyu" });
 

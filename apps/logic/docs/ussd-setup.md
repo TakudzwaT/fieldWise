@@ -1,15 +1,19 @@
 # USSD and SMS setup
 
 About 9 in 10 farmers around Kasungu have a basic keypad phone, not a
-smartphone. They reach FieldWise by USSD (dialling a code like `*384*123#`)
-and get alerts and Felix's messages by SMS. This guide covers the demo, the
+smartphone. They answer FieldWise by USSD: when there's a question for them,
+FieldWise opens the USSD session on their phone (a "push"), so they don't
+have to dial. They can also dial `*384*123#` themselves, and Felix's messages
+reach them by SMS. This guide covers the demo, the
 Africa's Talking sandbox, and what going live needs.
 
 ## How it works
 
 | Step | What happens |
 |---|---|
-| The forecast flags a farm | The farmer gets **one SMS**: the alert and "Dial *384*123# to answer." |
+| The forecast flags a farm | A USSD session **opens on the farmer's phone** with the alert and the first question. |
+| First time only | The language, then **"Which ward is your farm in?"** (10 wards), before the crop. Both are kept, so later alerts go straight to the crop. |
+| Push not answered | After 5 minutes (at the next hourly run, or **Send reminders** in the demo) the farmer gets **one SMS**: "Dial *384*123# to answer." |
 | The farmer dials | They go straight to the waiting questions, where they left off. `0` opens the menu. |
 | Each answer | Saved at once. A dropped call or a timeout resumes at the same question on the next dial. |
 | Nothing waiting | The menu: **1** report a crop problem, **2** messages from Felix, **3** ask Felix to call me, **4** language. |
@@ -20,19 +24,30 @@ questions always fit. A "thank you" line, or a retry hint, is dropped when a
 screen would be too long. Screens use plain GSM characters only, because many
 keypad phones show anything else as `?`.
 
-USSD can't be pushed to a phone: only the farmer can start a session. That is
-why alerts go by SMS. Each alert costs one or two SMS (two while the farmer's
-language isn't known, because it is in English and Chichewa).
+The wards in `WARDS` (`src/messages.ts`) are placeholders: ten places around
+Kasungu district. Replace them with the official ward list for Felix's area.
+Felix's phone, dashboard and app show each farm's ward.
+
+A pushed screen starts with the alert when it fits, else a one-line intro,
+else just "FieldWise". Reminders are pushed too.
+
+**Push needs the right gateway.** Network-initiated (pushed) USSD is only
+offered by some aggregators, and Africa's Talking's standard USSD API is
+dial-in only. Until a push gateway is wired in (`ussdPusher`'s `gateway` in
+`src/ussd.ts`), only the demo farmers' pushes happen (simulated); real
+farmers get the SMS with the dial code instead.
 
 ## The demo (no account needed)
 
 Open `/demo`. The left phone is a keypad phone for the seven USSD farmers
 (John Banda, F056, stays on WhatsApp). `/phone` opens it on its own.
 
-1. Press **Wet spell**. The phone buzzes and shows **1 new message**.
-2. Press the left key to read it, or **Messages** under the phone.
-3. Press **Dial *384*123#** (or type `*384*123#` and press the green key).
-4. Type a number on the keypad (or your keyboard) and press **OK** (or Enter).
+1. Press **Wet spell**. The phone buzzes and the USSD session opens by
+   itself: language, then ward, then the plant, then its questions.
+2. Type a number on the keypad (or your keyboard) and press **OK** (or Enter).
+3. To get back in later, press **Dial *384*123#** (or type `*384*123#` and
+   press the green key). It resumes at the same question.
+4. Felix's messages arrive as SMS: press the left key, or **Messages**.
    The right key clears, then cancels; the red key hangs up.
 5. A session idle for 2 minutes times out, as on a real network. Dial again to
    carry on.

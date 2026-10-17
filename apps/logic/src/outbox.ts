@@ -2,10 +2,12 @@
 // channel, then logged with how delivery went. "sim" farmers and demo farmers
 // have no delivery; the simulators read their messages from the log.
 //
-// USSD farmers can't be sent a USSD screen: they have to dial. So a batch for
-// them (an alert and its first question, say) goes out as one SMS: the text,
-// without the question, and "Dial *384*123# to answer." when a question is
-// waiting.
+// For USSD farmers, a batch that asks a question (an alert and its first
+// question, say) is pushed: FieldWise opens a USSD session on the phone with
+// the question on screen, so the farmer doesn't have to dial (see ussd.ts).
+// When a push isn't possible, or for a batch with no question (a message from
+// Felix), it goes out as one SMS: the text, and "Dial *384*123# to answer."
+// when a question is waiting.
 
 import { toText, type Prompt } from "./engine";
 import { dialText } from "./messages";
@@ -16,6 +18,9 @@ export type Outgoing = string | Prompt;
 
 /** Sends one message; returns the channel's id for it. Throws if it fails. */
 export type Deliver = (farmer: Farmer, message: Outgoing) => Promise<{ id: string }>;
+
+/** Opens a USSD session on the farmer's phone with this batch. False if it can't. */
+export type Push = (farmer: Farmer, messages: Outgoing[]) => Promise<boolean>;
 
 /** Who wrote a message, when it wasn't FieldWise itself. */
 export interface SendOptions {
@@ -29,10 +34,14 @@ export class Outbox {
     private deliverers: Partial<Record<Channel, Deliver>> = {},
     /** Called after logging, once per failed message (for WhatsApp's template fallback). */
     private onFailure?: (farmer: Farmer, error: unknown) => Promise<void>,
+    private push?: Push,
   ) {}
 
   async send(farmer: Farmer, messages: Outgoing[], options: SendOptions = {}): Promise<void> {
-    if (farmer.channel === "ussd") messages = asSms(farmer, messages);
+    if (farmer.channel === "ussd") {
+      if (this.push && asks(messages) && (await this.push(farmer, messages))) return;
+      messages = asSms(farmer, messages);
+    }
     if (!messages.length) return;
     const at = this.now().toISOString();
     const log: Omit<Message, "id">[] = [];
@@ -81,7 +90,11 @@ export class Outbox {
 /** A batch as one SMS: the text, and how to answer if it held a question. */
 export function asSms(farmer: Farmer, messages: Outgoing[]): string[] {
   const texts = messages.filter((m): m is string => typeof m === "string");
-  const asks = messages.some((m) => typeof m !== "string" && m.options.length > 0);
-  if (asks) texts.push(dialText(farmer.lang));
+  if (asks(messages)) texts.push(dialText(farmer.lang));
   return texts.length ? [texts.join("\n")] : [];
+}
+
+/** True when the batch puts a question to the farmer. */
+function asks(messages: Outgoing[]): boolean {
+  return messages.some((m) => typeof m !== "string" && m.options.length > 0);
 }

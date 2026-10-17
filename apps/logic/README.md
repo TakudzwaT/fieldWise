@@ -7,8 +7,9 @@ another. Their answers are scored into an outcome for Felix, the extension
 officer, who can reply to farmers and see who asked him to call.
 
 Farmers answer on whatever phone they have. About 9 in 10 around Kasungu have
-a basic keypad phone: they get alerts by **SMS** and answer by **USSD**
-(dialling `*384*123#`). The 1 in 10 with a smartphone use **WhatsApp**.
+a basic keypad phone: an alert opens a **USSD** session on their phone by
+itself, and they answer with the keypad (or dial `*384*123#` later). Felix's
+messages reach them by **SMS**. The 1 in 10 with a smartphone use **WhatsApp**.
 
 > **Status:** step 5 of 5. Alerts, questionnaires, scoring, the D1 database,
 > USSD and SMS (tested against simulated Africa's Talking calls), WhatsApp
@@ -25,9 +26,10 @@ bar has **Wet spell**, **Dry spell** and **Reset** for one farm or all.
 1. **Wet spell** (dashboard, demo controls) runs a made-up wet spell through
    the real rules. It puts all four crops at risk (late blight, maize leaf
    blights, bean leaf diseases, clubroot), and every farm gets one alert.
-2. On a keypad phone, the alert arrives as an SMS. Press **Dial *384*123#**,
-   then type numbers on the keypad and press **OK**: pick a language, the
-   plant to report on, then answer its questions. `0` opens the menu: report
+2. On a keypad phone, the USSD session opens by itself. Type numbers on the
+   keypad and press **OK**: pick a language and ward (first time only), the
+   plant to report on, then answer its questions. **Dial *384*123#** gets
+   back in later. `0` opens the menu: report
    a problem, read Felix's messages, ask Felix to call, change language. See
    [docs/ussd-setup.md](docs/ussd-setup.md).
    On John Banda's WhatsApp chat, pick a language, then the plant to report
@@ -101,8 +103,8 @@ in past seasons" means an infested field (rotation and liming, not a spray).
    farm's location to the weather API's `/assess` for all crops, looking 72
    hours ahead, and puts each disease's status through the trigger.
 2. Each alert raises a **flag**. A farm's new flags go out together: one alert
-   opens a **round**, which asks the language (first time only), then "Which
-   plant do you want to report on?" with the plants at risk.
+   opens a **round**, which asks the language and ward (first time only),
+   then "Which plant do you want to report on?" with the plants at risk.
 3. The farmer picks a plant and answers its questionnaires. Each finished one
    is scored, and the report is stored on its session. Then "Do you want to
    report on another plant?": **Yes** shows the list again without the plants

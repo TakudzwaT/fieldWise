@@ -18,7 +18,7 @@ export type FlagStatus = "awaiting" | "answered" | "no_response" | "merged" | "s
  */
 export type SessionStatus = "offered" | "queued" | "active" | "done" | "skipped";
 /** What the farmer is looking at in a round. */
-export type Screen = "lang" | "pick" | "questions" | "more";
+export type Screen = "lang" | "ward" | "pick" | "questions" | "more";
 
 export interface Farmer {
   id: string;
@@ -32,6 +32,8 @@ export interface Farmer {
   created_at: string;
   /** 1 for a made-up farmer: nothing sent to them leaves FieldWise. */
   demo?: number;
+  /** The ward the farmer said their farm is in; null until asked. */
+  ward?: string | null;
   officer_id?: string | null;
 }
 
@@ -53,6 +55,9 @@ export interface UssdSession {
   response: string;
   started_at: string;
   updated_at: string;
+  /** 1 when FieldWise opened the session on the phone (a push), not the farmer. */
+  pushed?: number;
+  fallback_at?: string | null;
 }
 
 /** "Ask Felix to call me". */
@@ -146,7 +151,7 @@ export interface Message {
 export interface FlagRow {
   flag: Flag;
   session: StoredSession | null;
-  farmer: Pick<Farmer, "id" | "name" | "farm_name" | "phone" | "channel">;
+  farmer: Pick<Farmer, "id" | "name" | "farm_name" | "phone" | "channel" | "ward">;
 }
 
 type Row = Record<string, unknown>;
@@ -199,6 +204,10 @@ export class Store {
 
   async setLang(farmerId: string, lang: Lang): Promise<void> {
     await this.db.prepare("UPDATE farmers SET lang = ? WHERE id = ?").bind(lang, farmerId).run();
+  }
+
+  async setWard(farmerId: string, ward: string): Promise<void> {
+    await this.db.prepare("UPDATE farmers SET ward = ? WHERE id = ?").bind(ward, farmerId).run();
   }
 
   // Tracks
@@ -288,7 +297,7 @@ export class Store {
            s.created_at AS s_created_at, s.started_at AS s_started_at, s.last_activity_at AS s_last_activity_at,
            s.reminded_at AS s_reminded_at, s.completed_at AS s_completed_at, s.report AS s_report,
            s.recheck_due_at AS s_recheck_due_at, s.version AS s_version, s.round_id AS s_round_id,
-           fa.name AS fa_name, fa.farm_name AS fa_farm_name, fa.phone AS fa_phone, fa.channel AS fa_channel
+           fa.name AS fa_name, fa.farm_name AS fa_farm_name, fa.phone AS fa_phone, fa.channel AS fa_channel, fa.ward AS fa_ward
          FROM flags f
          JOIN farmers fa ON fa.id = f.farmer_id
          LEFT JOIN sessions s ON s.flag_id = f.id
@@ -304,7 +313,7 @@ export class Store {
       return {
         flag: toFlag(flagRow),
         session: row.s_id ? toSession(pick("s_")) : null,
-        farmer: { id: row.farmer_id as string, ...(pick("fa_") as Pick<Farmer, "name" | "farm_name" | "phone" | "channel">) },
+        farmer: { id: row.farmer_id as string, ...(pick("fa_") as Pick<Farmer, "name" | "farm_name" | "phone" | "channel" | "ward">) },
       };
     });
   }
@@ -464,12 +473,12 @@ export class Store {
 
   /**
    * Delete every flag, round, session, track and message. Farmers stay, but forget
-   * their language, so the next demo starts with the language question. For demos.
+   * their language and ward, so the next demo starts with those questions. For demos.
    */
   async resetActivity(): Promise<void> {
     await this.db.batch([
       ...["flags", "rounds", "sessions", "tracks", "messages", "ussd_sessions", "callbacks"].map((table) => this.db.prepare(`DELETE FROM ${table}`)),
-      this.db.prepare("UPDATE farmers SET lang = NULL"),
+      this.db.prepare("UPDATE farmers SET lang = NULL, ward = NULL"),
     ]);
   }
 
@@ -641,12 +650,28 @@ export class Store {
   async saveUssdSession(s: UssdSession): Promise<void> {
     await this.db
       .prepare(
-        `INSERT INTO ussd_sessions (id, farmer_id, mode, page, inputs, response, started_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO ussd_sessions (id, farmer_id, mode, page, inputs, response, started_at, updated_at, pushed)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET mode = excluded.mode, page = excluded.page, inputs = excluded.inputs,
            response = excluded.response, updated_at = excluded.updated_at`,
       )
-      .bind(s.id, s.farmer_id, s.mode, s.page, s.inputs, s.response, s.started_at, s.updated_at)
+      .bind(s.id, s.farmer_id, s.mode, s.page, s.inputs, s.response, s.started_at, s.updated_at, s.pushed ?? 0)
       .run();
+  }
+
+  /** Pushed sessions nobody answered since `before`, with no SMS sent for them yet. */
+  async unansweredPushes(before: string): Promise<UssdSession[]> {
+    const { results } = await this.db
+      .prepare("SELECT * FROM ussd_sessions WHERE pushed = 1 AND inputs = 0 AND fallback_at IS NULL AND updated_at <= ?")
+      .bind(before)
+      .all<UssdSession>();
+    return results;
+  }
+
+  /** Record the SMS sent for an unanswered push. False if one already was. */
+  async markPushFallback(id: string, at: string): Promise<boolean> {
+    const result = await this.db.prepare("UPDATE ussd_sessions SET fallback_at = ? WHERE id = ? AND fallback_at IS NULL").bind(at, id).run();
+    return result.meta.changes > 0;
   }
 
   /** Forget USSD sessions untouched since `before`; networks end them within minutes. */

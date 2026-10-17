@@ -37,10 +37,16 @@ class Statement {
   }
 }
 
-export function testDb(): D1Database {
+/**
+ * A fresh database with every migration applied. The demo farmers already
+ * have a ward, so tests about the rest of the flow don't each answer the ward
+ * question first; pass `{ wards: false }` to test that question itself.
+ */
+export function testDb({ wards = true }: { wards?: boolean } = {}): D1Database {
   const db = new DatabaseSync(":memory:");
   const dir = join(dirname(fileURLToPath(import.meta.url)), "../migrations");
   for (const file of readdirSync(dir).sort()) db.exec(readFileSync(join(dir, file), "utf8"));
+  if (wards) db.exec("UPDATE farmers SET ward = 'Chulu'");
   return {
     prepare: (sql: string) => new Statement(db, sql),
     // D1 runs a batch as one transaction, with nothing else in between, so

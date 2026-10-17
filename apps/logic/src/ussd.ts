@@ -5,9 +5,13 @@
 // plain text starting "CON " (show this and wait for input) or "END " (show
 // this and hang up).
 //
-// FieldWise can't start a USSD session; the farmer dials. Alerts, reminders
-// and Felix's messages reach them by SMS (see outbox.ts), which says what to
-// dial. A dial then shows:
+// FieldWise starts the session itself when it has a question (a "push", or
+// network-initiated USSD): an alert or reminder opens on the farmer's phone
+// with the first question on screen. The farmer's replies come back through
+// the same callback as a dialled session. A push nobody answers within a few
+// minutes is followed by an SMS saying what to dial (pushFallbacks), and so
+// is everything when push isn't available. Felix's messages go by SMS.
+// Dialling *384*123# shows:
 // - the questions waiting for them, where they left off, if they were alerted;
 // - otherwise a menu: report a crop problem, read Felix's messages, ask Felix
 //   to call, or change language.
@@ -24,6 +28,8 @@ import type { Conversations } from "./conversation";
 import {
   callbackText,
   homePrompt,
+  pushIntroText,
+  pushMissedText,
   inboxPrompt,
   menuOption,
   noOfficerMessagesText,
@@ -31,7 +37,7 @@ import {
   reportPrompt,
   USSD_NOT_REGISTERED,
 } from "./messages";
-import type { Outgoing } from "./outbox";
+import type { Outbox, Outgoing, Push } from "./outbox";
 import { newId } from "./conversation";
 import { normalizePhone } from "./phone";
 import { CROPS, type Lang } from "./questionnaires";
@@ -41,6 +47,8 @@ import type { Farmer, Store, UssdSession } from "./store";
 export const MAX_SCREEN = 182;
 /** Networks end an idle USSD session after a few minutes; rows older than this are pruned. */
 export const SESSION_KEEP_MS = 24 * 60 * 60 * 1000;
+/** A push unanswered this long gets the SMS fallback. */
+export const PUSH_FALLBACK_MS = 5 * 60 * 1000;
 /** How many of the officer's messages the inbox goes back. */
 const INBOX = 5;
 
@@ -178,6 +186,69 @@ async function next(session: UssdSession, farmer: Farmer, input: string, deps: U
       return fromReplies(replies, farmer.lang);
     }
   }
+}
+
+/**
+ * Pushes USSD sessions. Demo farmers' pushes are simulated: the keypad phone
+ * page opens them. A real farmer needs `gateway`, which asks the network to
+ * open the session (network-initiated USSD, offered by some aggregators);
+ * without one, push returns false and the outbox sends an SMS instead.
+ */
+export function ussdPusher(
+  store: Store,
+  now: () => Date,
+  gateway?: (farmer: Farmer, sessionId: string, screen: string) => Promise<void>,
+): Push {
+  return async (farmer, messages) => {
+    if (!farmer.demo && !gateway) return false;
+    const last = [...messages].reverse().find((m): m is Prompt => typeof m !== "string" && m.options.length > 0);
+    if (!last) return false;
+    const texts = messages.filter((m): m is string => typeof m === "string");
+    // The whole alert if it fits above the question, else a one-line intro,
+    // else just "FieldWise", so the farmer knows who is asking.
+    const heads = [texts, [pushIntroText(farmer.lang)], ["FieldWise"]];
+    const response =
+      heads.map((h) => format(round(h, last, farmer.lang))).find((r, i) => heads[i].every((t) => r.includes(gsm(t)))) ??
+      format(round([], last, farmer.lang));
+    const id = newId("push");
+    const at = now().toISOString();
+    if (gateway) {
+      try {
+        await gateway(farmer, id, response);
+      } catch (err) {
+        console.error(`USSD push to ${farmer.id} failed`, err);
+        return false;
+      }
+    }
+    await store.saveUssdSession({ id, farmer_id: farmer.id, mode: "round", page: 0, inputs: 0, response, started_at: at, updated_at: at, pushed: 1 });
+    // provider_id carries the session, so the keypad phone page can open it.
+    await store.logMessage({
+      farmer_id: farmer.id,
+      direction: "out",
+      channel: farmer.channel,
+      body: response.slice(4),
+      at,
+      kind: "ussd",
+      screen: last.key,
+      provider_id: id,
+    });
+    return true;
+  };
+}
+
+/** SMS the farmers who didn't answer a push: what to dial. Returns how many. */
+export async function pushFallbacks(store: Store, outbox: Outbox, now: () => Date): Promise<number> {
+  const at = now();
+  let sent = 0;
+  for (const push of await store.unansweredPushes(new Date(at.getTime() - PUSH_FALLBACK_MS).toISOString())) {
+    if (!(await store.markPushFallback(push.id, at.toISOString()))) continue;
+    const farmer = await store.getFarmer(push.farmer_id);
+    // Nothing to answer any more (they dialled in and finished), no SMS.
+    if (!farmer || !(await store.openRound(farmer.id))) continue;
+    await outbox.send(farmer, [pushMissedText(farmer.lang)]);
+    sent++;
+  }
+  return sent;
 }
 
 /** A question from the round, with "0 Menu" under it. */

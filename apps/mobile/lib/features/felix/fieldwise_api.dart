@@ -19,6 +19,7 @@ class FieldwiseFarmer {
     required this.channel,
     required this.latitude,
     required this.longitude,
+    required this.ward,
   });
 
   factory FieldwiseFarmer.fromJson(Map<String, dynamic> json) =>
@@ -30,6 +31,7 @@ class FieldwiseFarmer {
         channel: json['channel'] as String,
         latitude: (json['latitude'] as num).toDouble(),
         longitude: (json['longitude'] as num).toDouble(),
+        ward: json['ward'] as String?,
       );
 
   final String id;
@@ -41,6 +43,9 @@ class FieldwiseFarmer {
   final String channel;
   final double latitude;
   final double longitude;
+
+  /// The ward the farmer gave (the first question they answer); null until then.
+  final String? ward;
 }
 
 /// One farm's line on Felix's priority list, from `GET /felix/priority`.

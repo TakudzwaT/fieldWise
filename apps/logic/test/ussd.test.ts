@@ -6,7 +6,7 @@ import { Outbox } from "../src/outbox";
 import type { DiseaseId } from "../src/questionnaires";
 import { smsDeliver } from "../src/sms";
 import { Store, type Farmer } from "../src/store";
-import { handleUssd, MAX_SCREEN } from "../src/ussd";
+import { handleUssd, MAX_SCREEN, pushFallbacks, ussdPusher } from "../src/ussd";
 import { testDb } from "./d1";
 
 const HOUR = 60 * 60 * 1000;
@@ -307,5 +307,88 @@ describe("http", () => {
   it("lists the ready-made replies", async () => {
     const { body } = await call("GET", "/felix/advice");
     expect(body.advice.map((a: { id: string }) => a.id)).toEqual(["visit_today", "visit_week", "remove_leaves", "keep_watching", "all_clear"]);
+  });
+});
+
+describe("pushed sessions and the ward", () => {
+  // Farmers without a ward, and an outbox that pushes USSD like the Worker's.
+  let outbox: Outbox;
+  beforeEach(() => {
+    const now = () => clock;
+    store = new Store(testDb({ wards: false }));
+    outbox = new Outbox(store, now, {}, undefined, ussdPusher(store, now));
+    conversations = new Conversations(store, outbox, now);
+  });
+  const alert = async (id = "F014") =>
+    conversations.raise(await farmer(id), WET.map((disease) => ({ disease, reason: "new", source: "forecast", details: {} })));
+  const pushes = async (id = "F014") => (await store.listMessages(id)).filter((m) => m.provider_id?.startsWith("push_"));
+  const answer = (sessionId: string, inputs: string[]) =>
+    handleUssd({ sessionId, serviceCode: "*384*123#", phoneNumber: phiri, text: inputs.join("*") }, { store, conversations, now: () => clock });
+
+  it("opens the questions on the phone instead of texting, and asks the ward before the crop", async () => {
+    await alert();
+    expect(await sms("F014")).toHaveLength(0);
+    const [push] = await pushes();
+    expect(push.body).toBe("FieldWise: weather alert / chenjezo la nyengo\nFieldWise: choose your language / Sankhani chiyankhulo\n1 English\n2 Chichewa");
+    const id = push.provider_id!;
+    const ward = await answer(id, ["1"]);
+    expect(ward).toBe(
+      "CON Which ward is your farm in?\n1 Kasungu Boma\n2 Chulu\n3 Santhe\n4 Kaluluma\n5 Chamama\n6 Mtunthama\n7 Bua\n8 Lisasadzi\n9 Kapelula\n10 Nkhamenya\n0 Menu",
+    );
+    expect(await answer(id, ["1", "4"])).toMatch(/^CON Which plant do you want to report on\?/);
+    expect((await farmer("F014")).ward).toBe("Kaluluma");
+    expect(priorityList(await store.flagRows())[0].farmer).toMatchObject({ id: "F014", ward: "Kaluluma" });
+  });
+
+  it("asks the ward only once, and takes its name too", async () => {
+    await store.setLang("F014", "ny");
+    await alert();
+    const [push] = await pushes();
+    // The ward list leaves no room for the intro in Chichewa; it says who is asking.
+    expect(push.body).toMatch(/^FieldWise\nKodi munda wanu uli m'dera liti\?/);
+    expect(push.body.length + 4).toBeLessThanOrEqual(MAX_SCREEN);
+    expect((await answer(push.provider_id!, ["mtunthama"]))).toMatch(/^CON Kodi mukufuna kutiuza za mbewu iti\?/);
+    expect((await farmer("F014")).ward).toBe("Mtunthama");
+  });
+
+  it("keeps the ward screen inside 182 characters, retries included", async () => {
+    await store.setLang("F014", "ny");
+    await alert();
+    const id = (await pushes())[0].provider_id!;
+    const retry = await answer(id, ["99"]);
+    expect(retry).toMatch(/^CON Chonde yankhani ndi nambala\./);
+    expect(retry.length).toBeLessThanOrEqual(MAX_SCREEN);
+  });
+
+  it("texts what to dial when nobody answers the push, once", async () => {
+    await alert();
+    clock = new Date(clock.getTime() + 4 * 60 * 1000);
+    expect(await pushFallbacks(store, outbox, () => clock)).toBe(0);
+    clock = new Date(clock.getTime() + 2 * 60 * 1000);
+    expect(await pushFallbacks(store, outbox, () => clock)).toBe(1);
+    expect(await pushFallbacks(store, outbox, () => clock)).toBe(0);
+    const [text] = await sms("F014");
+    expect(text.body).toContain("we tried to reach you about your crops. Dial *384*123# to answer.");
+  });
+
+  it("sends no SMS for a push that was answered", async () => {
+    await alert();
+    await answer((await pushes())[0].provider_id!, ["1"]);
+    clock = new Date(clock.getTime() + HOUR);
+    expect(await pushFallbacks(store, outbox, () => clock)).toBe(0);
+  });
+
+  it("pushes the reminder too", async () => {
+    await alert();
+    clock = new Date(clock.getTime() + 25 * HOUR);
+    expect((await conversations.sweep()).reminded).toBe(1);
+    expect(await pushes()).toHaveLength(2);
+  });
+
+  it("texts a real farmer instead, while no push gateway is set up", async () => {
+    const real: Farmer = { ...(await farmer("F014")), demo: 0 };
+    await conversations.raise(real, [{ disease: "late_blight", reason: "new", source: "forecast", details: {} }]);
+    expect(await pushes()).toHaveLength(0);
+    expect((await sms("F014"))[0]).toMatchObject({ status: "failed", error: "SMS is not configured" });
   });
 });

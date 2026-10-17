@@ -22,7 +22,7 @@ import { DISEASES, type DiseaseId, type Lang } from "./questionnaires";
 import { normalizePhone } from "./phone";
 import { smsConfig, smsDeliver, type SmsEnv } from "./sms";
 import { Store, type Farmer, type FlagRow, type Officer } from "./store";
-import { handleUssd, parseUssd, SESSION_KEEP_MS } from "./ussd";
+import { handleUssd, parseUssd, pushFallbacks, SESSION_KEEP_MS, ussdPusher } from "./ussd";
 import {
   WhatsAppError,
   OUTSIDE_WINDOW,
@@ -72,6 +72,8 @@ function app(env: Env, now: () => Date = () => new Date(), fetchFn: typeof fetch
     async (farmer, err) => {
       if (err instanceof WhatsAppError && err.code === OUTSIDE_WINDOW) await templateFallback(whatsapp, store, farmer, now(), fetchFn);
     },
+    // No push gateway is wired up yet, so only demo farmers' pushes happen (simulated).
+    ussdPusher(store, now),
   );
   return { store, conversations: new Conversations(store, outbox, now), outbox, now, whatsapp };
 }
@@ -105,9 +107,9 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
-    const { store, conversations, now } = app(env);
+    const { store, conversations, outbox, now } = app(env);
     const results = await runChecks(store, conversations, weatherApi(env.WEATHER_API), now());
-    const swept = await conversations.sweep();
+    const swept = { ...(await conversations.sweep()), pushFallbacks: await pushFallbacks(store, outbox, now) };
     await store.pruneUssdSessions(new Date(now().getTime() - SESSION_KEEP_MS).toISOString());
     const alerts = results.filter((r) => r.alert).length;
     const failed = results.filter((r) => r.error).length;
@@ -249,11 +251,13 @@ async function route(request: Request, url: URL, env: Env, { store, conversation
     const phone = typeof body.phone === "string" ? normalizePhone(body.phone) : null;
     if (!phone || typeof body.text !== "string") return error(400, "Pass phone and text.");
     // A button tap from the simulator says which screen its button was on.
-    const screen = typeof body.screen === "string" && /^(lang|pick|more|s\d)$/.test(body.screen) ? body.screen : undefined;
+    const screen = typeof body.screen === "string" && /^(lang|ward|pick|more|s\d)$/.test(body.screen) ? body.screen : undefined;
     return json({ replies: await conversations.inbound(phone, body.text, { screen }) });
   }
 
-  if (url.pathname === "/sweep" && method === "POST") return json(await conversations.sweep());
+  if (url.pathname === "/sweep" && method === "POST") {
+    return json({ ...(await conversations.sweep()), pushFallbacks: await pushFallbacks(store, outbox, now) });
+  }
 
   return error(404, "Not found.");
 }

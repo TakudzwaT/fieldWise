@@ -265,7 +265,7 @@ export function parseWebhook(body: unknown): { messages: Inbound[]; receipts: Re
         // touch; they get the current screen again.
         const message: Inbound = { id: String(m.id), phone, text: typeof text === "string" ? text : "", name: names.get(String(m.from)) ?? null };
         // Our buttons' and list rows' ids are "<screen>:<reply>", e.g. "s3:1" or "pick:2".
-        const tagged = m.type === "interactive" ? /^(lang|pick|more|s\d+):(\d+)$/.exec(message.text) : null;
+        const tagged = m.type === "interactive" ? /^(lang|ward|pick|more|s\d+):(\d+)$/.exec(message.text) : null;
         if (tagged) {
           message.screen = tagged[1];
           message.text = tagged[2];

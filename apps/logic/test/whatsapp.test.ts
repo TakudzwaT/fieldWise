@@ -228,6 +228,10 @@ describe("a judge's phone, end to end", () => {
     expect(sent[1].text.body).toContain("problems to your crops");
 
     await postWebhook(e, webhook({ messages: [buttonTap("lang:1")] })); // English
+    // The ward comes first, as a list of ten.
+    expect(sent.at(-1).interactive.body.text).toBe("Which ward is your farm in?");
+    expect(sent.at(-1).interactive.action.sections[0].rows).toHaveLength(10);
+    await postWebhook(e, webhook({ messages: [buttonTap("ward:2")] })); // Chulu
     expect(sent.at(-1).interactive.type).toBe("list");
     const pick = { from: JUDGE, id: "wamid.pick", type: "interactive", interactive: { type: "list_reply", list_reply: { id: "pick:2" } } };
     await postWebhook(e, webhook({ messages: [pick] })); // Maize
@@ -324,6 +328,7 @@ describe("taps on old buttons", () => {
     const judge = farmers.find((f: any) => f.channel === "whatsapp");
     await admin(e, "POST", "/flags", { farmer_id: judge.id, disease: "maize_leaf_blights" });
     await postWebhook(e, webhook({ messages: [buttonTap("lang:1")] })); // English
+    await postWebhook(e, webhook({ messages: [buttonTap("ward:1")] })); // Kasungu Boma
     await postWebhook(e, webhook({ messages: [buttonTap("pick:1")] })); // Maize
     // An old tap on the plant list doesn't answer question 1.
     await postWebhook(e, webhook({ messages: [buttonTap("pick:1")] }));

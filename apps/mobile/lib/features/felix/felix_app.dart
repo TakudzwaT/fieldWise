@@ -74,6 +74,7 @@ class _Farm {
   bool live = false;
   FieldwiseLine? line;
   String? phone;
+  String? ward;
 
   /// ussd (keypad phone: SMS and USSD), whatsapp, or sim (demo chat).
   String? channel;
@@ -436,6 +437,7 @@ class _WorkspaceState extends State<_Workspace> {
         ..line = line
         ..phone = farmer.phone
         ..channel = farmer.channel
+        ..ward = farmer.ward
         ..crop = line == null ? farm.crop : _cap(line.crop);
       farms.add(farm);
     }
@@ -820,7 +822,14 @@ class _WorkspaceState extends State<_Workspace> {
                     ),
                   ],
                 ),
-                Text('${farm.id} · ${farm.crop} · ${farm.status}'),
+                Text(
+                  [
+                    farm.id,
+                    if (farm.ward != null) '${farm.ward} ward',
+                    farm.crop,
+                    farm.status,
+                  ].join(' · '),
+                ),
                 const SizedBox(height: 18),
                 _detailLine('What to do', farm.action),
                 _detailLine('Why', farm.why),

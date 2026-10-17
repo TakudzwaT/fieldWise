@@ -1,6 +1,6 @@
 // The farmer's side of a flag. A farm's new flags go out together as one
-// alert, which opens a round: the farmer picks which at-risk plant to report
-// on, answers its questionnaire (every flagged one for that plant, one after
+// alert, which opens a round: the farmer picks a language and their ward (the
+// first time only), then which at-risk plant to report on, answers its questionnaire (every flagged one for that plant, one after
 // another), and is then asked whether to report on another plant. "No", or no
 // plants left, closes the round; plants not picked are marked skipped and left
 // off Felix's list. Black rot's re-check skips the pick and goes straight to
@@ -26,6 +26,8 @@ import {
   morePrompt,
   noQuestionsText,
   NOT_REGISTERED,
+  parseWard,
+  wardPrompt,
   nudgeText,
   parsePick,
   pickPrompt,
@@ -87,6 +89,7 @@ export function offeredCrops(sessions: StoredSession[]): Crop[] {
 /** The screen the farmer is on, and what it looks like. */
 export function currentPrompt(round: Round, sessions: StoredSession[], lang: Lang | null): Prompt {
   if (!lang || round.screen === "lang") return languagePrompt();
+  if (round.screen === "ward") return wardPrompt(lang);
   if (round.screen === "questions") {
     const active = sessions.find((s) => s.status === "active");
     if (active) return render({ ...active.state, lang });
@@ -175,7 +178,7 @@ export class Conversations {
       id: newId("rnd"),
       farmer_id: farmer.id,
       status: "open",
-      screen: !farmer.lang ? "lang" : direct ? "questions" : "pick",
+      screen: !farmer.lang ? "lang" : !farmer.ward ? "ward" : direct ? "questions" : "pick",
       reason,
       created_at: at,
       last_activity_at: at,
@@ -271,7 +274,7 @@ export class Conversations {
       const picked = parseLanguage(text);
       if (!picked) return (await this.save(round, [])) ? [languagePrompt(true)] : null;
       const active = sessions.find((s) => s.status === "active");
-      round.screen = active ? "questions" : offeredCrops(sessions).length ? "pick" : "more";
+      round.screen = !farmer.ward ? "ward" : nextScreen(sessions);
       if (active) {
         active.state.lang = picked;
         saves.push(active);
@@ -280,6 +283,14 @@ export class Conversations {
       await this.store.setLang(farmer.id, picked);
       farmer.lang = picked;
       return [currentPrompt(round, sessions, picked)];
+    } else if (round.screen === "ward") {
+      const ward = parseWard(text);
+      if (!ward) return (await this.save(round, [])) ? [wardPrompt(lang!, true)] : null;
+      round.screen = nextScreen(sessions);
+      if (!(await this.save(round, []))) return null;
+      await this.store.setWard(farmer.id, ward);
+      farmer.ward = ward;
+      return [currentPrompt(round, sessions, lang)];
     } else if (round.screen === "pick") {
       const crops = offeredCrops(sessions);
       const crop = parsePick(text, crops);
@@ -403,6 +414,12 @@ export class Conversations {
     return { reminded, noResponse, rechecks };
   }
 
+}
+
+/** Where a round goes once the language and ward are known. */
+function nextScreen(sessions: StoredSession[]): Round["screen"] {
+  if (sessions.some((s) => s.status === "active")) return "questions";
+  return offeredCrops(sessions).length ? "pick" : "more";
 }
 
 function newSession(flag: Flag, farmer: Farmer, at: string): StoredSession {
