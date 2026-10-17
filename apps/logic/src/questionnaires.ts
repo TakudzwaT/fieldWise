@@ -90,6 +90,30 @@ export interface Questionnaire {
   context?(ctx: FlagContext): string | null;
 }
 
+/** The plant on its own, for the "which plant?" list. */
+export const CROP_NAME: Record<Crop, Text> = {
+  tomato: { en: "Tomatoes", ny: "Matimati" },
+  maize: { en: "Maize", ny: "Chimanga" },
+  beans: { en: "Beans", ny: "Nyemba" },
+  cabbage: { en: "Cabbages", ny: "Kabichi" },
+};
+
+/** Words a farmer might type for each plant, in English and Chichewa. */
+export const CROP_WORDS: Record<string, Crop> = {
+  tomato: "tomato",
+  tomatoes: "tomato",
+  matimati: "tomato",
+  maize: "maize",
+  corn: "maize",
+  chimanga: "maize",
+  bean: "beans",
+  beans: "beans",
+  nyemba: "beans",
+  cabbage: "cabbage",
+  cabbages: "cabbage",
+  kabichi: "cabbage",
+};
+
 /** "Your tomatoes" in each language; Chichewa possessives agree with the noun. */
 export const CROP_LABEL: Record<Crop, Text> = {
   tomato: { en: "Your tomatoes", ny: "Matimati anu" },

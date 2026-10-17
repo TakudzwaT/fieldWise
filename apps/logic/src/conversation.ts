@@ -1,22 +1,38 @@
-// The farmer's side of a flag: raising it sends an alert and the first
-// question, each reply moves the questionnaire on, and the last answer is
-// scored for Felix. A farmer answers one questionnaire at a time; any others
-// wait in a queue and start when the current one is done.
+// The farmer's side of a flag. A farm's new flags go out together as one
+// alert, which opens a round: the farmer picks which at-risk plant to report
+// on, answers its questionnaire (every flagged one for that plant, one after
+// another), and is then asked whether to report on another plant. "No", or no
+// plants left, closes the round; plants not picked are marked skipped and left
+// off Felix's list. Black rot's re-check skips the pick and goes straight to
+// the cabbage questions.
 //
 // Housekeeping (sweep) runs on the cron: one reminder after a day of silence
 // (sooner on WhatsApp, see reminderDueAt), "no response" 24 h after that, and
 // black rot's re-ask a week after a clear.
 //
 // Replies can arrive at the same moment (two quick taps on WhatsApp are two
-// webhook calls). A session is only saved if nobody saved it since it was
-// read; otherwise the reply is handled again on the fresh session.
+// webhook calls). Every reply saves its round first, and only if nobody saved
+// it since it was read; otherwise the reply is handled again on the fresh round.
 
-import { render, reply, screenKey, start, toText } from "./engine";
-import { alertText, noQuestionsText, nudgeText, NOT_REGISTERED, reminderText, staleText } from "./messages";
+import { languagePrompt, normalize, parseLanguage, parseYesNo, render, reply, start, toText, type Prompt } from "./engine";
+import {
+  allDoneText,
+  alertText,
+  cropDoneText,
+  morePrompt,
+  noQuestionsText,
+  NOT_REGISTERED,
+  nudgeText,
+  parsePick,
+  pickPrompt,
+  reminderText,
+  sameCropNextText,
+  staleText,
+} from "./messages";
 import type { Outbox, Outgoing } from "./outbox";
-import type { DiseaseId } from "./questionnaires";
+import { CROPS, DISEASES, QUESTIONNAIRES, type Crop, type DiseaseId, type Lang } from "./questionnaires";
 import { score } from "./scoring";
-import type { Channel, Farmer, Flag, FlagDetails, FlagReason, FlagSource, Store, StoredSession } from "./store";
+import type { Channel, Farmer, Flag, FlagDetails, FlagReason, FlagSource, Round, Store, StoredSession } from "./store";
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -43,6 +59,38 @@ export function reminderDueAt(channel: Channel, lastActivity: string, lastInboun
 // The empty string is a message with no text (a voice note, photo or sticker).
 const RESUME = new Set(["", "start", "hi", "hello", "hey", "menu", "resume", "continue", "yambani", "moni", "moniwa"]);
 
+/** One flag to raise. */
+export interface Raise {
+  disease: DiseaseId;
+  reason: FlagReason;
+  source: FlagSource;
+  details: FlagDetails;
+}
+
+const cropOf = (s: StoredSession) => QUESTIONNAIRES[s.state.disease].crop;
+
+/** The plants waiting to be picked, in the order they were first offered, so the list's numbers don't move. */
+export function offeredCrops(sessions: StoredSession[]): Crop[] {
+  const first = new Map<Crop, string>();
+  for (const s of sessions) {
+    if (s.status !== "offered") continue;
+    const crop = cropOf(s);
+    if (!first.has(crop) || s.created_at < first.get(crop)!) first.set(crop, s.created_at);
+  }
+  return [...first].sort((a, b) => a[1].localeCompare(b[1]) || CROPS.indexOf(a[0]) - CROPS.indexOf(b[0])).map(([crop]) => crop);
+}
+
+/** The screen the farmer is on, and what it looks like. */
+export function currentPrompt(round: Round, sessions: StoredSession[], lang: Lang | null): Prompt {
+  if (!lang || round.screen === "lang") return languagePrompt();
+  if (round.screen === "questions") {
+    const active = sessions.find((s) => s.status === "active");
+    if (active) return render({ ...active.state, lang });
+  }
+  if (round.screen === "more") return morePrompt(lang);
+  return pickPrompt(offeredCrops(sessions), lang);
+}
+
 export class Conversations {
   constructor(
     private store: Store,
@@ -50,44 +98,76 @@ export class Conversations {
     private now: () => Date,
   ) {}
 
-  /** Raise a flag for a farmer: queue its questionnaire and alert if it is their turn. */
-  async raise(farmer: Farmer, disease: DiseaseId, reason: FlagReason, source: FlagSource, details: FlagDetails): Promise<Flag> {
+  /**
+   * Raise a farm's new flags. They join the farmer's open round, or open a
+   * new one with an alert and the "which plant?" list.
+   */
+  async raise(farmer: Farmer, raises: Raise[]): Promise<Flag[]> {
     const at = this.now().toISOString();
-    const flag: Flag = { id: newId("flag"), farmer_id: farmer.id, disease, reason, source, raised_at: at, details, status: "awaiting" };
+    const flags: Flag[] = [];
+    const sessions: StoredSession[] = [];
+    const nudges: Outgoing[] = [];
 
-    // A spell that got worse while its questionnaire is still open: nudge the
-    // farmer to finish it rather than starting the same questions again.
-    if (reason === "worse") {
-      const open = await this.store.openSessionFor(farmer.id, disease);
-      if (open) {
-        flag.status = "merged";
-        flag.details = { ...details, merged_into: open.flag_id };
-        await this.store.addFlag(flag);
-        if (open.status === "active") await this.outbox.send(farmer, [nudgeText(farmer.crop, farmer.lang), render(open.state)]);
-        return flag;
+    // Within a plant, ask the questionnaires in the document's order.
+    const ordered = [...raises].sort((a, b) => DISEASES.indexOf(a.disease) - DISEASES.indexOf(b.disease));
+    for (const r of ordered) {
+      const flag: Flag = { id: newId("flag"), farmer_id: farmer.id, disease: r.disease, reason: r.reason, source: r.source, raised_at: at, details: r.details, status: "awaiting" };
+      flags.push(flag);
+      // A spell that got worse while its questionnaire is still open: nudge the
+      // farmer to finish it rather than asking the same questions again.
+      if (r.reason === "worse") {
+        const open = await this.store.openSessionFor(farmer.id, r.disease);
+        if (open) {
+          flag.status = "merged";
+          flag.details = { ...r.details, merged_into: open.flag_id };
+          if (open.status === "active") nudges.push(nudgeText(QUESTIONNAIRES[r.disease].crop, farmer.lang), render(open.state));
+          continue;
+        }
       }
+      sessions.push(newSession(flag, farmer, at));
     }
 
-    // Starts now if the farmer has nothing else open; otherwise it waits.
-    const startsNow = !(await this.store.activeSession(farmer.id));
-    const session: StoredSession = {
-      id: newId("ses"),
-      flag_id: flag.id,
+    const round = sessions.length ? await this.store.openRound(farmer.id) : null;
+    if (!sessions.length || round) {
+      if (round) {
+        // Joins the open round. A plant the farmer is answering right now gets
+        // its new questions next; any other plant goes on the list.
+        const answering = (await this.store.roundSessions(round.id)).find((s) => s.status === "active");
+        for (const s of sessions) {
+          s.round_id = round.id;
+          s.status = answering && cropOf(answering) === cropOf(s) ? "queued" : "offered";
+        }
+      }
+      await this.store.addFlagsWithSessions(flags, sessions);
+      if (nudges.length) await this.outbox.send(farmer, nudges);
+      return flags;
+    }
+
+    // A re-check goes straight to its plant's questions; anything else starts
+    // with the list of plants at risk.
+    const recheck = sessions.every((s) => flags.find((f) => f.id === s.flag_id)!.reason === "recheck");
+    const reasons = new Set(sessions.map((s) => flags.find((f) => f.id === s.flag_id)!.reason));
+    const reason: FlagReason = recheck ? "recheck" : reasons.has("new") ? "new" : reasons.has("worse") ? "worse" : "manual";
+    const opened: Round = {
+      id: newId("rnd"),
       farmer_id: farmer.id,
-      status: startsNow ? "active" : "queued",
-      state: start(disease, farmer.lang).session,
+      status: "open",
+      screen: !farmer.lang ? "lang" : recheck ? "questions" : "pick",
+      reason,
       created_at: at,
-      started_at: startsNow ? at : null,
-      last_activity_at: startsNow ? at : null,
+      last_activity_at: at,
       reminded_at: null,
-      completed_at: null,
-      report: null,
-      recheck_due_at: null,
+      closed_at: null,
       version: 0,
     };
-    await this.store.addFlagWithSession(flag, session);
-    if (startsNow) await this.outbox.send(farmer, [alertText(reason, farmer.crop, farmer.lang), render(session.state)]);
-    return flag;
+    for (const s of sessions) {
+      s.round_id = opened.id;
+      s.status = recheck ? "queued" : "offered";
+    }
+    if (recheck) activate(sessions[0], farmer.lang, at);
+    await this.store.addFlagsWithSessions(flags, sessions, opened);
+    await this.outbox.send(farmer, [...nudges, alertText(reason, cropOf(sessions[0]), farmer.lang), currentPrompt(opened, sessions, farmer.lang)]);
+    return flags;
   }
 
   /**
@@ -108,56 +188,127 @@ export class Conversations {
     return [];
   }
 
-  /** One attempt at a reply. Null when another reply saved the session first. */
+  /** One attempt at a reply. Null when another reply saved the round first. */
   private async handle(farmer: Farmer, text: string, screen: string | undefined, at: string): Promise<Outgoing[] | null> {
-    const session = await this.store.activeSession(farmer.id);
-    if (!session) return [noQuestionsText(farmer.lang)];
+    const round = await this.store.openRound(farmer.id);
+    if (!round) return [noQuestionsText(farmer.lang)];
+    // Within a plant, ask the questionnaires in the document's order.
+    const sessions = (await this.store.roundSessions(round.id)).sort(
+      (a, b) => a.created_at.localeCompare(b.created_at) || DISEASES.indexOf(a.state.disease) - DISEASES.indexOf(b.state.disease),
+    );
+    const lang = farmer.lang;
+    // A farmer with no language (after a demo reset, say) picks one first.
+    if (!lang && round.screen !== "lang") round.screen = "lang";
+    round.last_activity_at = at;
+    const replies: Outgoing[] = [];
+    const saves: StoredSession[] = [];
+    let answered: StoredSession | null = null;
+    let skip = false;
 
     // A greeting, a template's Start button, or a voice note or photo shows the
     // current screen again rather than counting as a wrong answer. So does a
-    // tap on an earlier question's button, which would otherwise be taken as
-    // the answer to the current one.
-    const resume = RESUME.has(text.trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ""));
-    const stale = screen !== undefined && screen !== screenKey(session.state);
+    // tap on an earlier screen's button, which would otherwise be taken as the
+    // answer to the current one.
+    const resume = RESUME.has(normalize(text));
+    const stale = screen !== undefined && screen !== currentPrompt(round, sessions, lang).key;
     if (resume || stale) {
-      session.last_activity_at = at;
-      if (!(await this.store.saveSession(session))) return null;
-      return stale ? [staleText(farmer.lang), render(session.state)] : [render(session.state)];
+      if (stale) replies.push(staleText(lang));
+      replies.push(currentPrompt(round, sessions, lang));
+    } else if (round.screen === "lang") {
+      const picked = parseLanguage(text);
+      if (!picked) return (await this.save(round, [])) ? [languagePrompt(true)] : null;
+      const active = sessions.find((s) => s.status === "active");
+      round.screen = active ? "questions" : offeredCrops(sessions).length ? "pick" : "more";
+      if (active) {
+        active.state.lang = picked;
+        saves.push(active);
+      }
+      if (!(await this.save(round, saves))) return null;
+      await this.store.setLang(farmer.id, picked);
+      farmer.lang = picked;
+      return [currentPrompt(round, sessions, picked)];
+    } else if (round.screen === "pick") {
+      const crops = offeredCrops(sessions);
+      const crop = parsePick(text, crops);
+      if (!crop) replies.push(pickPrompt(crops, lang!, true));
+      else {
+        const chosen = sessions.filter((s) => s.status === "offered" && cropOf(s) === crop);
+        for (const s of chosen) s.status = "queued";
+        activate(chosen[0], lang, at);
+        saves.push(...chosen);
+        round.screen = "questions";
+        replies.push(render(chosen[0].state));
+      }
+    } else if (round.screen === "more") {
+      const yes = parseYesNo(text);
+      if (yes === null) replies.push(morePrompt(lang!, true));
+      else if (yes && offeredCrops(sessions).length) {
+        round.screen = "pick";
+        replies.push(pickPrompt(offeredCrops(sessions), lang!));
+      } else {
+        close(round, at);
+        skip = true;
+        replies.push(allDoneText(lang!));
+      }
+    } else {
+      const active = sessions.find((s) => s.status === "active");
+      if (!active) {
+        // Nothing left to answer for this plant; move on.
+        if (offeredCrops(sessions).length) {
+          round.screen = "more";
+          replies.push(morePrompt(lang!));
+        } else {
+          close(round, at);
+          replies.push(allDoneText(lang!));
+        }
+      } else {
+        const turn = reply(active.state, text);
+        active.state = turn.session;
+        active.last_activity_at = at;
+        saves.push(active);
+        if (!turn.done) replies.push(turn.prompt);
+        else {
+          const flag = await this.store.getFlag(active.flag_id);
+          active.report = score(active.state.disease, active.state.answers, { leafWetHours: flag?.details.leaf_wet_hours ?? undefined });
+          active.status = "done";
+          active.completed_at = at;
+          active.recheck_due_at = active.report.recheckInDays
+            ? new Date(this.now().getTime() + active.report.recheckInDays * DAY_MS).toISOString()
+            : null;
+          answered = active;
+          const crop = cropOf(active);
+          const next = sessions.find((s) => s.status === "queued");
+          if (next) {
+            activate(next, lang, at);
+            saves.push(next);
+            replies.push(sameCropNextText(crop, lang!), render(next.state));
+          } else if (offeredCrops(sessions).length) {
+            round.screen = "more";
+            replies.push(cropDoneText(crop, lang!), morePrompt(lang!));
+          } else {
+            close(round, at);
+            replies.push(allDoneText(lang!));
+          }
+        }
+      }
     }
 
-    const turn = reply(session.state, text);
-    session.state = turn.session;
-    session.last_activity_at = at;
-    const flag = await this.store.getFlag(session.flag_id);
-
-    if (!turn.done) {
-      if (!(await this.store.saveSession(session))) return null;
-      await this.afterSave(farmer, turn.session.lang, flag);
-      return [turn.prompt];
-    }
-
-    const report = score(session.state.disease, session.state.answers, { leafWetHours: flag?.details.leaf_wet_hours ?? undefined });
-    session.status = "done";
-    session.completed_at = at;
-    session.report = report;
-    session.recheck_due_at = report.recheckInDays ? new Date(this.now().getTime() + report.recheckInDays * DAY_MS).toISOString() : null;
-    if (!(await this.store.saveSession(session))) return null;
-    await this.afterSave(farmer, turn.session.lang, flag);
-    if (flag) await this.store.setFlagStatus(flag.id, "answered");
-
-    const replies: Outgoing[] = [turn.prompt];
-    const next = await this.store.nextQueued(farmer.id);
-    if (next) replies.push(...(await this.begin(farmer, next)));
+    if (!(await this.save(round, saves))) return null;
+    if (answered) await this.store.setFlagStatus(answered.flag_id, "answered");
+    if (skip) await this.store.skipOffered(round.id);
     return replies;
   }
 
-  /** Remember a newly picked language, and lift "no response" once the farmer answers. */
-  private async afterSave(farmer: Farmer, lang: Farmer["lang"], flag: Flag | null): Promise<void> {
-    if (lang && !farmer.lang) {
-      await this.store.setLang(farmer.id, lang);
-      farmer.lang = lang;
-    }
-    if (flag?.status === "no_response") await this.store.setFlagStatus(flag.id, "awaiting");
+  /**
+   * Save the round, then the sessions a reply changed. Only the round is
+   * checked for a conflicting save: every reply saves it first.
+   */
+  private async save(round: Round, sessions: StoredSession[]): Promise<boolean> {
+    if (!(await this.store.saveRound(round))) return false;
+    for (const s of sessions) await this.store.saveSession(s);
+    // A farmer who answers after being marked "no response" is back in.
+    if (round.reminded_at) await this.store.setRoundResponse(round.id, "no_response", "awaiting");
+    return true;
   }
 
   /** Reminders, no-response marks and re-asks that have come due. */
@@ -168,22 +319,22 @@ export class Conversations {
     let rechecks = 0;
 
     // Four hours is the soonest any reminder can be due; reminderDueAt decides.
-    for (const session of await this.store.needingReminder(new Date(now.getTime() - 4 * HOUR_MS).toISOString())) {
-      const farmer = await this.store.getFarmer(session.farmer_id);
-      if (!farmer || !session.last_activity_at) continue;
+    for (const round of await this.store.roundsNeedingReminder(new Date(now.getTime() - 4 * HOUR_MS).toISOString())) {
+      const farmer = await this.store.getFarmer(round.farmer_id);
+      if (!farmer) continue;
       const lastInbound = farmer.channel === "whatsapp" ? await this.store.lastInboundAt(farmer.id) : null;
-      if (now.getTime() < reminderDueAt(farmer.channel, session.last_activity_at, lastInbound)) continue;
-      session.reminded_at = now.toISOString();
+      if (now.getTime() < reminderDueAt(farmer.channel, round.last_activity_at, lastInbound)) continue;
+      round.reminded_at = now.toISOString();
       // A farmer who replied a moment ago doesn't need the reminder.
-      if (!(await this.store.saveSession(session))) continue;
-      await this.outbox.send(farmer, [reminderText(farmer.crop, farmer.lang), render(session.state)]);
+      if (!(await this.store.saveRound(round))) continue;
+      const sessions = await this.store.roundSessions(round.id);
+      await this.outbox.send(farmer, [reminderText(farmer.lang), currentPrompt(round, sessions, farmer.lang)]);
       reminded++;
     }
 
-    for (const session of await this.store.silentAfterReminder(new Date(now.getTime() - NO_RESPONSE_AFTER_MS).toISOString())) {
-      // The session stays open: a late reply still counts.
-      await this.store.setFlagStatus(session.flag_id, "no_response");
-      noResponse++;
+    for (const round of await this.store.roundsSilentAfterReminder(new Date(now.getTime() - NO_RESPONSE_AFTER_MS).toISOString())) {
+      // The round stays open: a late reply still counts.
+      noResponse += await this.store.setRoundResponse(round.id, "awaiting", "no_response");
     }
 
     for (const session of await this.store.rechecksDue(now.toISOString())) {
@@ -192,30 +343,50 @@ export class Conversations {
       const farmer = await this.store.getFarmer(session.farmer_id);
       const flag = await this.store.getFlag(session.flag_id);
       if (!farmer || !flag) continue;
-      await this.raise(farmer, flag.disease, "recheck", flag.source, flag.details);
+      await this.raise(farmer, [{ disease: flag.disease, reason: "recheck", source: flag.source, details: flag.details }]);
       rechecks++;
     }
 
     return { reminded, noResponse, rechecks };
   }
 
-  /** Start a queued session and return its opening messages. */
-  private async begin(farmer: Farmer, session: StoredSession): Promise<Outgoing[]> {
-    const at = this.now().toISOString();
-    // The farmer may have picked a language since this session was queued.
-    if (!session.state.lang && farmer.lang) session.state.lang = farmer.lang;
-    session.status = "active";
-    session.started_at = at;
-    session.last_activity_at = at;
-    await this.store.saveSession(session);
-    const flag = await this.store.getFlag(session.flag_id);
-    return [alertText(flag?.reason ?? "new", farmer.crop, farmer.lang), render(session.state)];
-  }
-
   private async send(farmer: Farmer, messages: Outgoing[]): Promise<string[]> {
     await this.outbox.send(farmer, messages);
     return messages.map((m) => (typeof m === "string" ? m : toText(m)));
   }
+}
+
+function newSession(flag: Flag, farmer: Farmer, at: string): StoredSession {
+  return {
+    id: newId("ses"),
+    flag_id: flag.id,
+    farmer_id: farmer.id,
+    round_id: null,
+    status: "offered",
+    state: start(flag.disease, farmer.lang).session,
+    created_at: at,
+    started_at: null,
+    last_activity_at: null,
+    reminded_at: null,
+    completed_at: null,
+    report: null,
+    recheck_due_at: null,
+    version: 0,
+  };
+}
+
+/** Put a picked session in front of the farmer. */
+function activate(session: StoredSession, lang: Lang | null, at: string): void {
+  // The farmer may have picked a language since this session was made.
+  if (lang) session.state.lang = lang;
+  session.status = "active";
+  session.started_at = at;
+  session.last_activity_at = at;
+}
+
+function close(round: Round, at: string): void {
+  round.status = "closed";
+  round.closed_at = at;
 }
 
 export function newId(prefix: string): string {

@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { apply, runChecks, scenarioAssessment, type Assessment } from "../src/checks";
-import { Conversations, reminderDueAt } from "../src/conversation";
+import { Conversations, reminderDueAt, type Raise } from "../src/conversation";
 import { Outbox } from "../src/outbox";
-import { Store, type Farmer } from "../src/store";
+import type { DiseaseId } from "../src/questionnaires";
+import { Store, type Farmer, type FlagDetails, type FlagReason } from "../src/store";
 import { testDb } from "./d1";
 
 const HOUR = 60 * 60 * 1000;
@@ -20,6 +21,15 @@ beforeEach(() => {
 const later = (hours: number) => (clock = new Date(clock.getTime() + hours * HOUR));
 const farmer = async (id: string) => (await store.getFarmer(id)) as Farmer;
 const outgoing = async (id: string) => (await store.listMessages(id)).filter((m) => m.direction === "out").map((m) => m.body);
+const flagged = (diseases: DiseaseId[], reason: FlagReason = "new", details: FlagDetails = {}): Raise[] =>
+  diseases.map((disease) => ({ disease, reason, source: "forecast", details }));
+const raise = async (id: string, diseases: DiseaseId[], reason: FlagReason = "new", details: FlagDetails = {}) =>
+  conversations.raise(await farmer(id), flagged(diseases, reason, details));
+const sessionsOf = async (id: string) => {
+  const round = await store.openRound(id);
+  return round ? store.roundSessions(round.id) : [];
+};
+const active = async (id: string) => (await sessionsOf(id)).find((s) => s.status === "active");
 
 /** Reply to every question; "YN YY ..." = main/follow answers. */
 async function answerAll(phone: string, pattern: string) {
@@ -28,53 +38,122 @@ async function answerAll(phone: string, pattern: string) {
   return replies;
 }
 
-const banda = "+2650000000056"; // John Banda, tomato
+const banda = "+2650000000056"; // John Banda
+const chirwa = "+2650000000062"; // Esther Chirwa
+const WET: DiseaseId[] = ["late_blight", "maize_leaf_blights", "bean_leaf_diseases", "clubroot"];
 
-describe("a flag reaches the farmer and their answers come back", () => {
-  it("alerts in both languages until the farmer picks one, then asks the questions", async () => {
-    await conversations.raise(await farmer("F056"), "late_blight", "new", "forecast", { leaf_wet_hours: 14 });
-    const [alert, firstScreen] = await outgoing("F056");
-    expect(alert).toContain("this week's weather can bring problems to your tomatoes");
-    expect(alert).toContain("matimati anu");
-    expect(firstScreen).toContain("choose your language");
+describe("a weather flag reaches the farmer as one alert", () => {
+  it("asks the language, then which plant, then that plant's questions", async () => {
+    await raise("F056", WET);
+    const messages = await outgoing("F056");
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toContain("this week's weather can bring problems to your crops");
+    expect(messages[0]).toContain("mbewu zanu");
+    expect(messages[1]).toContain("choose your language");
+
+    const [list] = await conversations.inbound(banda, "1");
+    expect(list).toBe("Which plant do you want to report on?\n1 Tomatoes\n2 Maize\n3 Beans\n4 Cabbages");
+    expect((await farmer("F056")).lang).toBe("en");
 
     const [question] = await conversations.inbound(banda, "1");
     expect(question).toBe("Your tomatoes · 1 of 8\nDo any leaves have brown or black patches that look wet?\n1 Yes\n2 No");
-    expect((await farmer("F056")).lang).toBe("en");
   });
 
-  it("scores the finished questionnaire and marks the flag answered", async () => {
-    const flag = await conversations.raise(await farmer("F056"), "late_blight", "new", "forecast", {});
+  it("takes the plant's name as well as its number, and asks again for anything else", async () => {
+    await raise("F056", WET);
+    await conversations.inbound(banda, "2"); // Chichewa
+    const [retry] = await conversations.inbound(banda, "7");
+    expect(retry).toMatch(/^Chonde yankhani ndi nambala ya mbewu\./);
+    const [question] = await conversations.inbound(banda, "Kabichi");
+    expect(question).toMatch(/^Kabichi wanu · 1 mwa 8/);
+  });
+
+  it("scores the plant, then asks about another; the list leaves out plants already done", async () => {
+    const [blight] = await raise("F056", ["late_blight", "maize_leaf_blights"]);
     await conversations.inbound(banda, "1");
+    await conversations.inbound(banda, "1"); // Tomatoes
     const replies = await answerAll(banda, "NN NN NN YY");
-    expect(replies[0]).toMatch(/^Thank you/);
-
-    const session = await store.getSessionByFlag(flag.id);
-    expect(session?.status).toBe("done");
+    expect(replies).toEqual([
+      "Thank you. Your answers about your tomatoes have been sent to your extension officer.",
+      "Do you want to report on another plant?\n1 Yes\n2 No",
+    ]);
+    const session = await store.getSessionByFlag(blight.id);
     expect(session?.report).toMatchObject({ outcome: "wrong_flag", answersSay: ["bacterial wilt"], urgent: true });
-    expect((await store.getFlag(flag.id))?.status).toBe("answered");
+    expect((await store.getFlag(blight.id))?.status).toBe("answered");
+
+    const [list] = await conversations.inbound(banda, "1");
+    expect(list).toBe("Which plant do you want to report on?\n1 Maize");
+    const [question] = await conversations.inbound(banda, "1");
+    expect(question).toMatch(/^Your maize · 1 of 8/);
   });
 
-  it("queues a second flag and starts it when the first is done", async () => {
-    const banda1 = await farmer("F056");
-    await conversations.raise(banda1, "late_blight", "new", "forecast", {});
-    const second = await conversations.raise(banda1, "bacterial_wilt", "new", "forecast", {});
-    expect((await store.getSessionByFlag(second.id))?.status).toBe("queued");
-
+  it("closes on No, and the plants not picked are skipped", async () => {
+    const [, maize] = await raise("F056", ["late_blight", "maize_leaf_blights"]);
     await conversations.inbound(banda, "1");
-    const replies = await answerAll(banda, "NN NN NN NN");
-    expect(replies).toHaveLength(3);
-    expect(replies[1]).toContain("weather can bring problems to your tomatoes");
-    expect(replies[1]).not.toContain("matimati"); // language is known now
-    expect(replies[2]).toBe("Your tomatoes · 1 of 8\nAre any whole plants wilting?\n1 Yes\n2 No");
-    expect((await store.getSessionByFlag(second.id))?.status).toBe("active");
+    await conversations.inbound(banda, "1");
+    await answerAll(banda, "NN NN NN NN");
+    expect(await conversations.inbound(banda, "2")).toEqual(["Thank you. Your answers have been sent to your extension officer."]);
+    expect((await store.getFlag(maize.id))?.status).toBe("skipped");
+    expect((await store.getSessionByFlag(maize.id))?.status).toBe("skipped");
+    expect(await store.openRound("F056")).toBeNull();
+    expect((await conversations.inbound(banda, "hi"))[0]).toMatch(/no questions for you right now/);
+  });
+
+  it("thanks and closes without asking when the last plant is done", async () => {
+    await raise("F056", ["late_blight"]);
+    await conversations.inbound(banda, "1");
+    await conversations.inbound(banda, "1");
+    expect(await answerAll(banda, "NN NN NN NN")).toEqual(["Thank you. Your answers have been sent to your extension officer."]);
+    expect(await store.openRound("F056")).toBeNull();
+  });
+
+  it("asks every flagged questionnaire for the plant picked, one after another", async () => {
+    await raise("F062", ["clubroot", "black_rot"]);
+    await conversations.inbound(chirwa, "1");
+    expect(await conversations.inbound(chirwa, "1")).toEqual([
+      "Your cabbages · 1 of 8\nAre the edges of any leaves turning yellow or brown?\n1 Yes\n2 No",
+    ]);
+    const between = await answerAll(chirwa, "NN NN NN NN");
+    expect(between[0]).toBe("Thank you. A few more questions about your cabbages.");
+    expect(between[1]).toMatch(/^Your cabbages · 1 of 8\nAre any plants wilting even though the ground is wet\?/);
+    expect(await answerAll(chirwa, "NN NN NN NN")).toEqual(["Thank you. Your answers have been sent to your extension officer."]);
+  });
+
+  it("adds new flags to the open round without a second alert", async () => {
+    await raise("F056", ["late_blight"]);
+    await conversations.inbound(banda, "1");
+    await conversations.inbound(banda, "1"); // answering tomatoes
+    const sent = (await outgoing("F056")).length;
+    const [maize] = await raise("F056", ["maize_leaf_blights"]);
+    const [wilt] = await raise("F056", ["bacterial_wilt"]);
+    expect(await outgoing("F056")).toHaveLength(sent);
+    expect((await store.getSessionByFlag(maize.id))?.status).toBe("offered");
+    // Same plant as the one being answered: asked straight after it.
+    expect((await store.getSessionByFlag(wilt.id))?.status).toBe("queued");
+
+    const next = await answerAll(banda, "NN NN NN NN");
+    expect(next[1]).toMatch(/^Your tomatoes · 1 of 8\nAre any whole plants wilting/);
+    expect(await answerAll(banda, "NN NN NN NN")).toContain("Do you want to report on another plant?\n1 Yes\n2 No");
+  });
+
+  it("opens a new round with a new alert once the last one is closed", async () => {
+    await raise("F056", ["late_blight"]);
+    await conversations.inbound(banda, "1");
+    await conversations.inbound(banda, "1");
+    await answerAll(banda, "NN NN NN NN");
+    await raise("F056", ["maize_leaf_blights"]);
+    const messages = await outgoing("F056");
+    expect(messages.at(-2)).toBe("FieldWise: this week's weather can bring problems to your crops. Please check your plants today and tell us what you see.");
+    expect(messages.at(-1)).toBe("Which plant do you want to report on?\n1 Maize");
   });
 
   it("resumes where the farmer stopped", async () => {
-    await conversations.raise(await farmer("F056"), "late_blight", "new", "forecast", {});
+    await raise("F056", ["late_blight"]);
+    await conversations.inbound(banda, "1");
     await conversations.inbound(banda, "1");
     await conversations.inbound(banda, "1");
     later(5);
+    expect((await conversations.inbound(banda, "hi"))[0]).toContain("2 of 8");
     const [next] = await conversations.inbound(banda, "2");
     expect(next).toContain("3 of 8");
   });
@@ -85,10 +164,11 @@ describe("a flag reaches the farmer and their answers come back", () => {
   });
 
   it("nudges instead of restarting when a spell gets worse mid-questionnaire", async () => {
-    const first = await conversations.raise(await farmer("F056"), "late_blight", "new", "forecast", {});
+    const [first] = await raise("F056", ["late_blight"]);
     await conversations.inbound(banda, "1");
     await conversations.inbound(banda, "1");
-    const worse = await conversations.raise(await farmer("F056"), "late_blight", "worse", "forecast", {});
+    await conversations.inbound(banda, "1");
+    const [worse] = await raise("F056", ["late_blight"], "worse");
     expect(worse.status).toBe("merged");
     expect(worse.details.merged_into).toBe(first.id);
     const messages = await outgoing("F056");
@@ -99,25 +179,25 @@ describe("a flag reaches the farmer and their answers come back", () => {
 
 describe("silent farmers", () => {
   it("get one reminder after 24 h, then show as no response, and can still answer", async () => {
-    const flag = await conversations.raise(await farmer("F056"), "late_blight", "new", "forecast", {});
+    const flags = await raise("F056", ["late_blight", "maize_leaf_blights"]);
     later(23);
     expect(await conversations.sweep()).toEqual({ reminded: 0, noResponse: 0, rechecks: 0 });
     later(2);
     expect(await conversations.sweep()).toEqual({ reminded: 1, noResponse: 0, rechecks: 0 });
-    expect((await outgoing("F056")).at(-2)).toContain("still waiting for your answers about your tomatoes");
+    expect((await outgoing("F056")).at(-2)).toContain("we are still waiting for your answers");
     later(25);
-    expect(await conversations.sweep()).toEqual({ reminded: 0, noResponse: 1, rechecks: 0 });
-    expect((await store.getFlag(flag.id))?.status).toBe("no_response");
+    expect(await conversations.sweep()).toEqual({ reminded: 0, noResponse: 2, rechecks: 0 });
+    for (const flag of flags) expect((await store.getFlag(flag.id))?.status).toBe("no_response");
 
     await conversations.inbound(banda, "1");
-    expect((await store.getFlag(flag.id))?.status).toBe("awaiting");
+    for (const flag of flags) expect((await store.getFlag(flag.id))?.status).toBe("awaiting");
     expect(await conversations.sweep()).toEqual({ reminded: 0, noResponse: 0, rechecks: 0 });
   });
 
-  it("black rot that comes back clear is asked again a week later", async () => {
-    const chirwa = "+2650000000062";
-    await conversations.raise(await farmer("F062"), "black_rot", "new", "forecast", {});
+  it("black rot that comes back clear is asked again a week later, straight to the cabbage questions", async () => {
+    await raise("F062", ["black_rot"]);
     await conversations.inbound(chirwa, "2");
+    await conversations.inbound(chirwa, "1");
     await answerAll(chirwa, "NN NN NN NN");
     later(24 * 7 - 1);
     expect((await conversations.sweep()).rechecks).toBe(0);
@@ -125,15 +205,17 @@ describe("silent farmers", () => {
     expect((await conversations.sweep()).rechecks).toBe(1);
     const recheck = (await store.listFlags("F062"))[0];
     expect(recheck).toMatchObject({ disease: "black_rot", reason: "recheck", status: "awaiting" });
-    expect((await outgoing("F062")).at(-2)).toContain("chonde yang'aniraninso kabichi wanu");
+    const messages = await outgoing("F062");
+    expect(messages.at(-2)).toContain("chonde yang'aniraninso kabichi wanu");
+    expect(messages.at(-1)).toMatch(/^Kabichi wanu · 1 mwa 8/);
   });
 });
 
 describe("forecast checks", () => {
-  const assessment = (status: "flag" | "watch" | "clear", wet = 12): Assessment => ({
+  const assessment = (status: "flag" | "watch" | "clear", wet = 12, diseases: DiseaseId[] = ["late_blight"]): Assessment => ({
     window: { air_temp_mean: 19, soil_temp_mean: 24, leaf_wet_run_max: wet, wet_or_humid_run_max: wet, rain_total: 3 },
     soil: { drainage: "good" },
-    results: [{ disease: "late_blight", status, conditions: [] }],
+    results: diseases.map((disease) => ({ disease, status, conditions: [] })),
   });
 
   it("alerts once when conditions change into a flag", async () => {
@@ -147,6 +229,12 @@ describe("forecast checks", () => {
     }
     expect(alerts).toEqual([null, null, "new", null, null]);
     expect(await store.listFlags("F056")).toHaveLength(1);
+  });
+
+  it("sends one alert for all of a farm's new flags", async () => {
+    const results = await apply(store, conversations, await farmer("F056"), assessment("flag", 12, ["late_blight", "maize_leaf_blights"]), "forecast", clock);
+    expect(results.every((r) => r.flag)).toBe(true);
+    expect(await outgoing("F056")).toHaveLength(2);
   });
 
   it("keeps the weather behind the flag for Felix", async () => {
@@ -171,48 +259,59 @@ describe("forecast checks", () => {
 });
 
 describe("demo scenario", () => {
-  it("a wet spell flags every disease of each crop, using the weather API's rules", async () => {
-    const statuses = async (id: string) =>
-      scenarioAssessment(await farmer(id), "wet", clock).results.map((r) => `${r.disease}:${r.status}`);
-    expect(await statuses("F056")).toEqual(["late_blight:flag", "bacterial_wilt:flag"]);
-    expect(await statuses("F014")).toEqual(["maize_leaf_blights:flag"]);
-    expect(await statuses("F027")).toEqual(["bean_leaf_diseases:flag"]);
-    expect(await statuses("F062")).toEqual(["black_rot:flag", "clubroot:flag"]);
+  it("a wet spell puts all four crops at risk, using the weather API's rules", () => {
+    expect(scenarioAssessment("wet", clock).results.map((r) => `${r.disease}:${r.status}`)).toEqual([
+      "late_blight:flag",
+      "bacterial_wilt:watch",
+      "maize_leaf_blights:flag",
+      "bean_leaf_diseases:flag",
+      "black_rot:watch",
+      "clubroot:flag",
+    ]);
   });
 
   it("a dry spell clears them, so the next wet spell alerts again", async () => {
-    const tomato = await farmer("F084");
+    const ruth = await farmer("F084");
     const run = async (weather: "wet" | "dry") =>
-      (await apply(store, conversations, tomato, scenarioAssessment(tomato, weather, clock), "scenario", clock)).map((r) => r.alert);
-    expect(await run("wet")).toEqual(["new", "new"]);
-    expect(await run("wet")).toEqual([null, null]);
-    expect(await run("dry")).toEqual([null, null]);
-    expect(await run("wet")).toEqual(["new", "new"]);
+      (await apply(store, conversations, ruth, scenarioAssessment(weather, clock), "scenario", clock)).filter((r) => r.alert).length;
+    expect(await run("wet")).toBe(4);
+    expect(await run("wet")).toBe(0);
+    expect(await run("dry")).toBe(0);
+    expect(await run("wet")).toBe(4);
     expect((await store.listFlags("F084")).every((f) => f.source === "scenario")).toBe(true);
   });
 });
 
 describe("replies at the same moment", () => {
   it("counts two taps on the same button once", async () => {
-    await conversations.raise(await farmer("F056"), "late_blight", "new", "forecast", {});
+    await raise("F056", ["late_blight"]);
+    await conversations.inbound(banda, "1");
     await conversations.inbound(banda, "1");
     const [a, b] = await Promise.all([
       conversations.inbound(banda, "1", { screen: "s0" }),
       conversations.inbound(banda, "1", { screen: "s0" }),
     ]);
-    const session = await store.activeSession("F056");
-    expect(session?.state).toMatchObject({ step: 1, answers: [{ main: true }] });
+    expect((await active("F056"))?.state).toMatchObject({ step: 1, answers: [{ main: true }] });
     // One tap moved on; the other was seen as an old button.
     expect([a, b].flat().join("\n")).toContain("that button was for an earlier question");
   });
 
+  it("picks one plant when the list is tapped twice", async () => {
+    await raise("F056", WET);
+    await conversations.inbound(banda, "1");
+    await Promise.all([
+      conversations.inbound(banda, "1", { screen: "pick" }),
+      conversations.inbound(banda, "2", { screen: "pick" }),
+    ]);
+    expect((await sessionsOf("F056")).filter((s) => s.status === "active")).toHaveLength(1);
+  });
+
   it("counts two different typed answers arriving together, in turn", async () => {
-    await conversations.raise(await farmer("F056"), "late_blight", "new", "forecast", {});
+    await raise("F056", ["late_blight"]);
+    await conversations.inbound(banda, "1");
     await conversations.inbound(banda, "1");
     await Promise.all([conversations.inbound(banda, "1"), conversations.inbound(banda, "2")]);
-    const session = await store.activeSession("F056");
-    expect(session?.state.step).toBe(2);
-    expect(session?.version).toBeGreaterThanOrEqual(3);
+    expect((await active("F056"))?.state.step).toBe(2);
   });
 });
 
@@ -236,13 +335,13 @@ describe("WhatsApp reminder timing", () => {
 
   it("sends the WhatsApp reminder before the window closes", async () => {
     const judge: Farmer = {
-      id: "W1", name: "Judge", farm_name: null, phone: "+2650000000111", crop: "maize",
+      id: "W1", name: "Judge", farm_name: null, phone: "+2650000000111",
       latitude: -13.03, longitude: 33.48, lang: "en", channel: "whatsapp", created_at: clock.toISOString(),
     };
     await store.addFarmer(judge);
-    await store.logMessage({ farmer_id: "W1", direction: "in", channel: "whatsapp", body: "join maize", at: clock.toISOString() });
+    await store.logMessage({ farmer_id: "W1", direction: "in", channel: "whatsapp", body: "join", at: clock.toISOString() });
     later(6);
-    await conversations.raise(judge, "maize_leaf_blights", "new", "forecast", {});
+    await conversations.raise(judge, flagged(["maize_leaf_blights"]));
     // Joined 6 h before the alert, so the window closes 18 h after it: remind at 15 h.
     later(14);
     expect((await conversations.sweep()).reminded).toBe(0);

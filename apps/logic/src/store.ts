@@ -1,22 +1,28 @@
-// D1 storage for farmers, alert tracks, flags, sessions and messages.
+// D1 storage for farmers, alert tracks, flags, rounds, sessions and messages.
 
 import type { Session } from "./engine";
-import type { Crop, DiseaseId, Lang } from "./questionnaires";
+import type { DiseaseId, Lang } from "./questionnaires";
 import type { Report } from "./scoring";
 import type { Status, Track } from "./trigger";
 
 export type Channel = "whatsapp" | "sim";
 export type FlagReason = "new" | "worse" | "recheck" | "manual";
 export type FlagSource = "forecast" | "scenario" | "manual";
-export type FlagStatus = "awaiting" | "answered" | "no_response" | "merged";
-export type SessionStatus = "queued" | "active" | "done";
+export type FlagStatus = "awaiting" | "answered" | "no_response" | "merged" | "skipped";
+/**
+ * offered: at risk, waiting for the farmer to pick its plant. queued: picked,
+ * behind another questionnaire for the same plant. skipped: the farmer said
+ * they were done without picking it.
+ */
+export type SessionStatus = "offered" | "queued" | "active" | "done" | "skipped";
+/** What the farmer is looking at in a round. */
+export type Screen = "lang" | "pick" | "questions" | "more";
 
 export interface Farmer {
   id: string;
   name: string;
   farm_name: string | null;
   phone: string;
-  crop: Crop;
   latitude: number;
   longitude: number;
   lang: Lang | null;
@@ -47,10 +53,29 @@ export interface Flag {
   status: FlagStatus;
 }
 
+/**
+ * One alert to a farmer and everything they answer for it: pick a plant,
+ * answer its questions, then pick another or say they are done.
+ */
+export interface Round {
+  id: string;
+  farmer_id: string;
+  status: "open" | "closed";
+  screen: Screen;
+  reason: FlagReason;
+  created_at: string;
+  last_activity_at: string;
+  reminded_at: string | null;
+  closed_at: string | null;
+  /** Bumped on every save; see saveRound. */
+  version: number;
+}
+
 export interface StoredSession {
   id: string;
   flag_id: string;
   farmer_id: string;
+  round_id: string | null;
   status: SessionStatus;
   state: Session;
   created_at: string;
@@ -83,7 +108,7 @@ export interface Message {
 export interface FlagRow {
   flag: Flag;
   session: StoredSession | null;
-  farmer: Pick<Farmer, "id" | "name" | "farm_name" | "crop">;
+  farmer: Pick<Farmer, "id" | "name" | "farm_name">;
 }
 
 type Row = Record<string, unknown>;
@@ -111,15 +136,14 @@ export class Store {
   async addFarmer(farmer: Farmer): Promise<void> {
     await this.db
       .prepare(
-        `INSERT INTO farmers (id, name, farm_name, phone, crop, latitude, longitude, lang, channel, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO farmers (id, name, farm_name, phone, latitude, longitude, lang, channel, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         farmer.id,
         farmer.name,
         farmer.farm_name,
         farmer.phone,
-        farmer.crop,
         farmer.latitude,
         farmer.longitude,
         farmer.lang,
@@ -215,8 +239,8 @@ export class Store {
            s.id AS s_id, s.flag_id AS s_flag_id, s.farmer_id AS s_farmer_id, s.status AS s_status, s.state AS s_state,
            s.created_at AS s_created_at, s.started_at AS s_started_at, s.last_activity_at AS s_last_activity_at,
            s.reminded_at AS s_reminded_at, s.completed_at AS s_completed_at, s.report AS s_report,
-           s.recheck_due_at AS s_recheck_due_at, s.version AS s_version,
-           fa.name AS fa_name, fa.farm_name AS fa_farm_name, fa.crop AS fa_crop
+           s.recheck_due_at AS s_recheck_due_at, s.version AS s_version, s.round_id AS s_round_id,
+           fa.name AS fa_name, fa.farm_name AS fa_farm_name
          FROM flags f
          JOIN farmers fa ON fa.id = f.farmer_id
          LEFT JOIN sessions s ON s.flag_id = f.id
@@ -232,43 +256,130 @@ export class Store {
       return {
         flag: toFlag(flagRow),
         session: row.s_id ? toSession(pick("s_")) : null,
-        farmer: { id: row.farmer_id as string, ...(pick("fa_") as Pick<Farmer, "name" | "farm_name" | "crop">) },
+        farmer: { id: row.farmer_id as string, ...(pick("fa_") as Pick<Farmer, "name" | "farm_name">) },
       };
     });
   }
 
-  // Sessions
+  // Rounds and sessions
 
-  async addSession(session: StoredSession): Promise<void> {
-    await this.sessionInsert(session).run();
+  /** Flags and their sessions, and the round they open if there is one, in one batch. */
+  async addFlagsWithSessions(flags: Flag[], sessions: StoredSession[], round?: Round): Promise<void> {
+    const statements = [...flags.map((f) => this.flagInsert(f)), ...sessions.map((s) => this.sessionInsert(s))];
+    if (round) {
+      statements.unshift(
+        this.db
+          .prepare(
+            `INSERT INTO rounds (id, farmer_id, status, screen, reason, created_at, last_activity_at, reminded_at, closed_at, version)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(...roundValues(round), round.version),
+      );
+    }
+    if (statements.length) await this.db.batch(statements);
   }
 
-  /** A flag and its session, written together in one batch. */
-  async addFlagWithSession(flag: Flag, session: StoredSession): Promise<void> {
-    await this.db.batch([this.flagInsert(flag), this.sessionInsert(session)]);
+  async openRound(farmerId: string): Promise<Round | null> {
+    return this.db
+      .prepare("SELECT * FROM rounds WHERE farmer_id = ? AND status = 'open' ORDER BY created_at LIMIT 1")
+      .bind(farmerId)
+      .first<Round>();
+  }
+
+  /**
+   * Save a round if nobody else has saved it since it was read. Every reply
+   * saves its round first, so this is what keeps two replies handled at the
+   * same moment from both landing. Returns false (and saves nothing) when
+   * another reply got there first; the caller should read again and redo.
+   */
+  async saveRound(round: Round): Promise<boolean> {
+    const [id, ...rest] = roundValues(round);
+    const result = await this.db
+      .prepare(
+        `UPDATE rounds SET farmer_id = ?, status = ?, screen = ?, reason = ?, created_at = ?, last_activity_at = ?,
+           reminded_at = ?, closed_at = ?, version = version + 1
+         WHERE id = ? AND version = ?`,
+      )
+      .bind(...rest, id, round.version)
+      .run();
+    if (result.meta.changes === 0) return false;
+    round.version++;
+    return true;
+  }
+
+  /** A round's sessions, oldest first. */
+  async roundSessions(roundId: string): Promise<StoredSession[]> {
+    const { results } = await this.db
+      .prepare("SELECT * FROM sessions WHERE round_id = ? ORDER BY created_at, id")
+      .bind(roundId)
+      .all<Row>();
+    return results.map(toSession);
+  }
+
+  /** Open rounds with no activity since `before` and no reminder yet. */
+  async roundsNeedingReminder(before: string): Promise<Round[]> {
+    const { results } = await this.db
+      .prepare("SELECT * FROM rounds WHERE status = 'open' AND reminded_at IS NULL AND last_activity_at <= ?")
+      .bind(before)
+      .all<Round>();
+    return results;
+  }
+
+  /** Open rounds reminded at or before `before` and still silent since. */
+  async roundsSilentAfterReminder(before: string): Promise<Round[]> {
+    const { results } = await this.db
+      .prepare("SELECT * FROM rounds WHERE status = 'open' AND reminded_at <= ? AND last_activity_at <= reminded_at")
+      .bind(before)
+      .all<Round>();
+    return results;
+  }
+
+  /**
+   * Move a round's unanswered flags between "awaiting" and "no_response".
+   * Returns how many changed.
+   */
+  async setRoundResponse(roundId: string, from: "awaiting" | "no_response", to: "awaiting" | "no_response"): Promise<number> {
+    const result = await this.db
+      .prepare(
+        `UPDATE flags SET status = ? WHERE status = ? AND id IN
+           (SELECT flag_id FROM sessions WHERE round_id = ? AND status IN ('offered', 'queued', 'active'))`,
+      )
+      .bind(to, from, roundId)
+      .run();
+    return result.meta.changes;
+  }
+
+  /** Mark every plant the farmer didn't pick in a round as skipped, with its flag. */
+  async skipOffered(roundId: string): Promise<void> {
+    await this.db.batch([
+      this.db
+        .prepare("UPDATE flags SET status = 'skipped' WHERE id IN (SELECT flag_id FROM sessions WHERE round_id = ? AND status = 'offered')")
+        .bind(roundId),
+      this.db.prepare("UPDATE sessions SET status = 'skipped' WHERE round_id = ? AND status = 'offered'").bind(roundId),
+    ]);
   }
 
   private sessionInsert(session: StoredSession): D1PreparedStatement {
     return this.db
       .prepare(
         `INSERT INTO sessions (id, flag_id, farmer_id, status, state, created_at, started_at, last_activity_at,
-           reminded_at, completed_at, report, recheck_due_at, version)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           reminded_at, completed_at, report, recheck_due_at, round_id, version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(...sessionValues(session), session.version);
   }
 
   /**
    * Save a session if nobody else has saved it since it was read. Returns false
-   * (and saves nothing) when another reply got there first; the caller should
-   * read it again and redo its change.
+   * (and saves nothing) when something else got there first.
    */
   async saveSession(session: StoredSession): Promise<boolean> {
     const [id, ...rest] = sessionValues(session);
     const result = await this.db
       .prepare(
         `UPDATE sessions SET flag_id = ?, farmer_id = ?, status = ?, state = ?, created_at = ?, started_at = ?,
-           last_activity_at = ?, reminded_at = ?, completed_at = ?, report = ?, recheck_due_at = ?, version = version + 1
+           last_activity_at = ?, reminded_at = ?, completed_at = ?, report = ?, recheck_due_at = ?, round_id = ?,
+           version = version + 1
          WHERE id = ? AND version = ?`,
       )
       .bind(...rest, id, session.version)
@@ -283,54 +394,16 @@ export class Store {
     return row ? toSession(row) : null;
   }
 
-  async activeSession(farmerId: string): Promise<StoredSession | null> {
-    const row = await this.db
-      .prepare("SELECT * FROM sessions WHERE farmer_id = ? AND status = 'active' ORDER BY created_at LIMIT 1")
-      .bind(farmerId)
-      .first<Row>();
-    return row ? toSession(row) : null;
-  }
-
-  async nextQueued(farmerId: string): Promise<StoredSession | null> {
-    const row = await this.db
-      .prepare("SELECT * FROM sessions WHERE farmer_id = ? AND status = 'queued' ORDER BY created_at, id LIMIT 1")
-      .bind(farmerId)
-      .first<Row>();
-    return row ? toSession(row) : null;
-  }
-
   /** An unfinished session for this farm and disease, if one is open. */
   async openSessionFor(farmerId: string, disease: DiseaseId): Promise<StoredSession | null> {
     const row = await this.db
       .prepare(
         `SELECT s.* FROM sessions s JOIN flags f ON f.id = s.flag_id
-         WHERE s.farmer_id = ? AND f.disease = ? AND s.status != 'done' ORDER BY s.created_at LIMIT 1`,
+         WHERE s.farmer_id = ? AND f.disease = ? AND s.status NOT IN ('done', 'skipped') ORDER BY s.created_at LIMIT 1`,
       )
       .bind(farmerId, disease)
       .first<Row>();
     return row ? toSession(row) : null;
-  }
-
-  /** Active sessions with no activity since `before` and no reminder yet. */
-  async needingReminder(before: string): Promise<StoredSession[]> {
-    const { results } = await this.db
-      .prepare("SELECT * FROM sessions WHERE status = 'active' AND reminded_at IS NULL AND last_activity_at <= ?")
-      .bind(before)
-      .all<Row>();
-    return results.map(toSession);
-  }
-
-  /** Active sessions reminded at or before `before` and still silent since. */
-  async silentAfterReminder(before: string): Promise<StoredSession[]> {
-    const { results } = await this.db
-      .prepare(
-        `SELECT s.* FROM sessions s JOIN flags f ON f.id = s.flag_id
-         WHERE s.status = 'active' AND s.reminded_at <= ? AND s.last_activity_at <= s.reminded_at
-           AND f.status = 'awaiting'`,
-      )
-      .bind(before)
-      .all<Row>();
-    return results.map(toSession);
   }
 
   async rechecksDue(now: string): Promise<StoredSession[]> {
@@ -342,12 +415,12 @@ export class Store {
   }
 
   /**
-   * Delete every flag, session, track and message. Farmers stay, but forget
+   * Delete every flag, round, session, track and message. Farmers stay, but forget
    * their language, so the next demo starts with the language question. For demos.
    */
   async resetActivity(): Promise<void> {
     await this.db.batch([
-      ...["flags", "sessions", "tracks", "messages"].map((table) => this.db.prepare(`DELETE FROM ${table}`)),
+      ...["flags", "rounds", "sessions", "tracks", "messages"].map((table) => this.db.prepare(`DELETE FROM ${table}`)),
       this.db.prepare("UPDATE farmers SET lang = NULL"),
     ]);
   }
@@ -407,7 +480,7 @@ export class Store {
   /** Delete a farmer and everything about them. For STOP. */
   async deleteFarmer(farmerId: string): Promise<void> {
     await this.db.batch(
-      ["messages", "sessions", "flags", "tracks"]
+      ["messages", "rounds", "sessions", "flags", "tracks"]
         .map((table) => this.db.prepare(`DELETE FROM ${table} WHERE farmer_id = ?`).bind(farmerId))
         .concat(this.db.prepare("DELETE FROM farmers WHERE id = ?").bind(farmerId)),
     );
@@ -454,5 +527,10 @@ function sessionValues(s: StoredSession) {
     s.completed_at,
     s.report ? JSON.stringify(s.report) : null,
     s.recheck_due_at,
+    s.round_id,
   ];
+}
+
+function roundValues(r: Round) {
+  return [r.id, r.farmer_id, r.status, r.screen, r.reason, r.created_at, r.last_activity_at, r.reminded_at, r.closed_at];
 }

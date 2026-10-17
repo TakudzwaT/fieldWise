@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { start } from "../src/engine";
+import { pickPrompt } from "../src/messages";
 import worker, { type Env } from "../src/index";
 import { isStop, parseJoin, parseWebhook, payload, validSignature, verifySubscription } from "../src/whatsapp";
 import { testDb } from "./d1";
@@ -115,6 +116,31 @@ describe("message format", () => {
     ]);
     expect(payload("+265991234567", "Hello")).toMatchObject({ type: "text", text: { body: "Hello", preview_url: false } });
   });
+
+  it("sends up to three plants as buttons, and more as a list", () => {
+    const three = payload("+265991234567", pickPrompt(["tomato", "maize", "beans"], "en")) as any;
+    expect(three.interactive.type).toBe("button");
+    expect(three.interactive.action.buttons.map((b: any) => b.reply.id)).toEqual(["pick:1", "pick:2", "pick:3"]);
+
+    const four = payload("+265991234567", pickPrompt(["tomato", "maize", "beans", "cabbage"], "en")) as any;
+    expect(four.interactive).toEqual({
+      type: "list",
+      body: { text: "Which plant do you want to report on?" },
+      action: {
+        button: "Choose / Sankhani",
+        sections: [
+          {
+            rows: [
+              { id: "pick:1", title: "Tomatoes" },
+              { id: "pick:2", title: "Maize" },
+              { id: "pick:3", title: "Beans" },
+              { id: "pick:4", title: "Cabbages" },
+            ],
+          },
+        ],
+      },
+    });
+  });
 });
 
 describe("webhook security", () => {
@@ -173,30 +199,38 @@ describe("parsing", () => {
   });
 
   it("reads join commands in English and Chichewa", () => {
-    expect(parseJoin("JOIN Tomato")).toBe("tomato");
-    expect(parseJoin("join chimanga")).toBe("maize");
-    expect(parseJoin("join")).toBeNull();
-    expect(parseJoin("join rice")).toBeNull();
-    expect(parseJoin("hello")).toBeUndefined();
+    expect(parseJoin("JOIN")).toBe(true);
+    expect(parseJoin("lowani")).toBe(true);
+    expect(parseJoin("join maize")).toBe(true); // the old form still works
+    expect(parseJoin("hello")).toBe(false);
+  });
+
+  it("reads a tap on a list row", () => {
+    const tap = { from: JUDGE, id: "wamid.list", type: "interactive", interactive: { type: "list_reply", list_reply: { id: "pick:4", title: "Cabbages" } } };
+    const [m] = parseWebhook(webhook({ messages: [tap] })).messages;
+    expect(m).toMatchObject({ text: "4", screen: "pick" });
   });
 });
 
 describe("a judge's phone, end to end", () => {
-  it("joins, gets an alert with buttons, and answers by tapping", async () => {
+  it("joins, gets an alert with buttons, picks a plant and answers by tapping", async () => {
     const e = env();
-    await postWebhook(e, webhook({ contacts: [{ wa_id: JUDGE, profile: { name: "Thoko Banda" } }], messages: [textMessage("join maize")] }));
+    await postWebhook(e, webhook({ contacts: [{ wa_id: JUDGE, profile: { name: "Thoko Banda" } }], messages: [textMessage("join")] }));
     expect(sent).toHaveLength(1);
-    expect(sent[0].text.body).toContain("welcome, Thoko Banda. You are registered with maize near Kasungu");
+    expect(sent[0].text.body).toContain("welcome, Thoko Banda. You are registered near Kasungu");
 
     const { farmers } = await admin(e, "GET", "/farmers");
     const judge = farmers.find((f: any) => f.phone === "+265991234567");
-    expect(judge).toMatchObject({ name: "Thoko Banda", crop: "maize", channel: "whatsapp", lang: null });
+    expect(judge).toMatchObject({ name: "Thoko Banda", channel: "whatsapp", lang: null });
 
     await admin(e, "POST", "/demo/scenario", { weather: "wet", farmer_id: judge.id });
     expect(sent.slice(1).map((m) => m.type)).toEqual(["text", "interactive"]);
-    expect(sent[1].text.body).toContain("problems to your maize");
+    expect(sent[1].text.body).toContain("problems to your crops");
 
-    await postWebhook(e, webhook({ messages: [buttonTap("1")] })); // English
+    await postWebhook(e, webhook({ messages: [buttonTap("lang:1")] })); // English
+    expect(sent.at(-1).interactive.type).toBe("list");
+    const pick = { from: JUDGE, id: "wamid.pick", type: "interactive", interactive: { type: "list_reply", list_reply: { id: "pick:2" } } };
+    await postWebhook(e, webhook({ messages: [pick] })); // Maize
     expect(sent.at(-1).interactive.header.text).toBe("Your maize · 1 of 8");
 
     // A greeting mid-questionnaire shows the same screen again, without "please reply 1 or 2".
@@ -205,14 +239,18 @@ describe("a judge's phone, end to end", () => {
     expect(sent.at(-1).interactive.body.text).not.toMatch(/Please reply/);
 
     for (const id of ["1", "1", "1", "1", "2", "2", "2", "2"]) await postWebhook(e, webhook({ messages: [buttonTap(id)] }));
-    expect(sent.at(-1).text.body).toMatch(/^Thank you/);
+    expect(sent.at(-2).text.body).toBe("Thank you. Your answers about your maize have been sent to your extension officer.");
+    expect(sent.at(-1).interactive.body.text).toBe("Do you want to report on another plant?");
+    await postWebhook(e, webhook({ messages: [buttonTap("more:2")] })); // No
+    expect(sent.at(-1).text.body).toBe("Thank you. Your answers have been sent to your extension officer.");
     const { farms } = await admin(e, "GET", "/felix/priority");
-    expect(farms[0]).toMatchObject({ farmer: { id: judge.id }, state: "answered", report: { answersSay: ["grey leaf spot"] } });
+    expect(farms).toHaveLength(1);
+    expect(farms[0]).toMatchObject({ farmer: { id: judge.id }, crop: "maize", state: "answered", report: { answersSay: ["grey leaf spot"] }, also: [] });
   });
 
   it("handles a message Meta delivers twice only once", async () => {
     const e = env();
-    const message = textMessage("join beans");
+    const message = textMessage("join");
     await postWebhook(e, webhook({ messages: [message] }));
     await postWebhook(e, webhook({ messages: [message] }));
     expect(sent).toHaveLength(1);
@@ -221,14 +259,14 @@ describe("a judge's phone, end to end", () => {
   it("tells strangers how to join, or that they aren't registered when joining is off", async () => {
     await postWebhook(env(), webhook({ messages: [textMessage("hello", "265881111111")] }));
     expect(sent.at(-1).text.body).toMatch(/to join, reply JOIN/);
-    await postWebhook(env({ WHATSAPP_OPEN_JOIN: undefined }), webhook({ messages: [textMessage("join maize", "265882222222")] }));
+    await postWebhook(env({ WHATSAPP_OPEN_JOIN: undefined }), webhook({ messages: [textMessage("join", "265882222222")] }));
     expect(sent.at(-1).text.body).toMatch(/not registered/);
   });
 });
 
 describe("delivery receipts and the 24-hour window", () => {
   async function joined(e: Env) {
-    await postWebhook(e, webhook({ messages: [textMessage("join tomato")] }));
+    await postWebhook(e, webhook({ messages: [textMessage("join")] }));
     const { farmers } = await admin(e, "GET", "/farmers");
     return farmers.find((f: any) => f.channel === "whatsapp");
   }
@@ -256,7 +294,7 @@ describe("delivery receipts and the 24-hour window", () => {
     expect(templates[0].template).toEqual({
       name: "fieldwise_check",
       language: { code: "en" },
-      components: [{ type: "body", parameters: [{ type: "text", text: "tomatoes" }] }],
+      components: [{ type: "body", parameters: [{ type: "text", text: "crops" }] }],
     });
 
     // A failure reported later by receipt doesn't send a second one the same day.
@@ -281,11 +319,15 @@ describe("delivery receipts and the 24-hour window", () => {
 describe("taps on old buttons", () => {
   it("re-shows the current question instead of taking an old button as its answer", async () => {
     const e = env();
-    await postWebhook(e, webhook({ messages: [textMessage("join maize")] }));
+    await postWebhook(e, webhook({ messages: [textMessage("join")] }));
     const { farmers } = await admin(e, "GET", "/farmers");
     const judge = farmers.find((f: any) => f.channel === "whatsapp");
     await admin(e, "POST", "/flags", { farmer_id: judge.id, disease: "maize_leaf_blights" });
     await postWebhook(e, webhook({ messages: [buttonTap("lang:1")] })); // English
+    await postWebhook(e, webhook({ messages: [buttonTap("pick:1")] })); // Maize
+    // An old tap on the plant list doesn't answer question 1.
+    await postWebhook(e, webhook({ messages: [buttonTap("pick:1")] }));
+    expect(sent.at(-1).interactive.header.text).toBe("Your maize · 1 of 8");
     await postWebhook(e, webhook({ messages: [buttonTap("s0:1")] })); // Q1 yes
     expect(sent.at(-1).interactive.header.text).toBe("Your maize · 2 of 8");
 
@@ -310,7 +352,7 @@ describe("taps on old buttons", () => {
 describe("STOP", () => {
   it("confirms, then deletes the farmer and everything about them", async () => {
     const e = env();
-    await postWebhook(e, webhook({ messages: [textMessage("join beans")] }));
+    await postWebhook(e, webhook({ messages: [textMessage("join")] }));
     expect(sent.at(-1).text.body).toContain("Text STOP at any time to stop.");
     const judge = (await admin(e, "GET", "/farmers")).farmers.find((f: any) => f.channel === "whatsapp");
     await admin(e, "POST", "/flags", { farmer_id: judge.id, disease: "bean_leaf_diseases" });

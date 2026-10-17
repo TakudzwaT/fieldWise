@@ -14,7 +14,7 @@ About 30 minutes, most of it waiting for verification codes.
 - WhatsApp only allows free-form messages (questions with Yes/No buttons)
   **within 24 hours of the farmer's last message**. Outside that window only
   an approved *template* can be sent. So for the demo, each phone texts the
-  number first (`join maize`, see below), which opens the window.
+  number first (`join`, see below), which opens the window.
 - The chat shows the business as "Test Number", not FieldWise.
 
 ---
@@ -102,7 +102,7 @@ In [WhatsApp Manager](https://business.facebook.com/wa/manage/message-templates/
 | Name | `fieldwise_check` |
 | Language | English |
 | Body | `FieldWise: the weather this week can bring problems to your {{1}}. Please check your plants today and answer a few quick questions.` |
-| Sample for {{1}} | `tomatoes` |
+| Sample for {{1}} | `crops` |
 | Button | Quick reply: `Start` |
 
 Approval usually takes minutes to a few hours. Only the English template is
@@ -133,7 +133,7 @@ npx wrangler secret put WHATSAPP_APP_SECRET
 npx wrangler secret put WHATSAPP_VERIFY_TOKEN
 ```
 
-To let phones register themselves by texting `join <crop>` (recommended for
+To let phones register themselves by texting `join` (recommended for
 the demo):
 
 ```bash
@@ -166,24 +166,25 @@ receipts.
 From one of the phones you added, send the test number:
 
 ```
-join tomato
+join
 ```
 
-FieldWise replies that you're registered (crops: `tomato`, `maize`, `beans`,
-`cabbage`, or `matimati`, `chimanga`, `nyemba`, `kabichi`). Then on the
-dashboard, pick that farmer under **Demo controls** and press **Wet spell**.
-The alert and the first question arrive on the phone with buttons.
+FieldWise replies that you're registered. Then on the dashboard, pick that
+farmer under **Demo controls** and press **Wet spell**. The alert and the
+language question arrive on the phone with buttons, then the list of plants
+at risk.
 
 ---
 
 ## On demo day
 
-1. Before going on stage, each phone texts `join <crop>`. That registers it
+1. Before going on stage, each phone texts `join`. That registers it
    and opens its 24-hour window.
 2. On the dashboard, choose a judge's farm and press **Wet spell**. Their phone
    buzzes with the alert and the language question.
-3. They tap through the eight questions. The dashboard updates as they go.
-   Tapping an old question's button by mistake just shows the current one.
+3. They pick a plant from the list and tap through its eight questions, then
+   choose whether to report on another. The dashboard updates as they go.
+   Tapping an old button by mistake just shows the current screen.
 4. `/sim?farmer=<id>` mirrors any farmer's WhatsApp chat, with sent,
    delivered and read ticks, if you want it on the projector.
 

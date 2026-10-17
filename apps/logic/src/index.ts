@@ -14,7 +14,7 @@ import { Conversations, newId } from "./conversation";
 import { priorityList, summary } from "./felix";
 import { dashboardPage, demoPage, officerPage, simulatorPage } from "./pages";
 import { Outbox } from "./outbox";
-import { CROPS, DISEASES, QUESTIONNAIRES, type Crop, type DiseaseId, type Lang } from "./questionnaires";
+import { DISEASES, type DiseaseId, type Lang } from "./questionnaires";
 import { normalizePhone } from "./phone";
 import { Store, type Farmer, type FlagRow } from "./store";
 import {
@@ -127,8 +127,7 @@ async function route(request: Request, url: URL, env: Env, { store, conversation
     if (!farmer) return error(400, "farmer_id must be an existing farmer.");
     const disease = body.disease as DiseaseId;
     if (!DISEASES.includes(disease)) return error(400, `disease must be one of ${DISEASES.join(", ")}.`);
-    if (QUESTIONNAIRES[disease].crop !== farmer.crop) return error(400, `${disease} is not a ${farmer.crop} disease.`);
-    const flag = await conversations.raise(farmer, disease, "manual", "manual", {});
+    const [flag] = await conversations.raise(farmer, [{ disease, reason: "manual", source: "manual", details: {} }]);
     return json({ flag }, 201);
   }
 
@@ -147,9 +146,8 @@ async function route(request: Request, url: URL, env: Env, { store, conversation
     if (!farmers.length) return error(404, "No farmer with that id.");
     const results = [];
     const tracks = await store.listTracks();
-    for (const farmer of farmers) {
-      results.push(...(await apply(store, conversations, farmer, scenarioAssessment(farmer, weather, now()), "scenario", now(), tracks)));
-    }
+    const assessment = scenarioAssessment(weather, now());
+    for (const farmer of farmers) results.push(...(await apply(store, conversations, farmer, assessment, "scenario", now(), tracks)));
     return json({ weather, results });
   }
 
@@ -167,7 +165,7 @@ async function route(request: Request, url: URL, env: Env, { store, conversation
     const phone = typeof body.phone === "string" ? normalizePhone(body.phone) : null;
     if (!phone || typeof body.text !== "string") return error(400, "Pass phone and text.");
     // A button tap from the simulator says which screen its button was on.
-    const screen = typeof body.screen === "string" && /^(lang|s\d)$/.test(body.screen) ? body.screen : undefined;
+    const screen = typeof body.screen === "string" && /^(lang|pick|more|s\d)$/.test(body.screen) ? body.screen : undefined;
     return json({ replies: await conversations.inbound(phone, body.text, { screen }) });
   }
 
@@ -203,11 +201,10 @@ async function whatsappRoute(request: Request, url: URL, env: Env, ctx?: Executi
 async function addFarmer(request: Request, store: Store, now: () => Date): Promise<Response> {
   const body = await readJson(request);
   if (body instanceof Response) return body;
-  const { name, farm_name, crop, latitude, longitude, lang, channel } = body;
+  const { name, farm_name, latitude, longitude, lang, channel } = body;
   const phone = typeof body.phone === "string" ? normalizePhone(body.phone) : null;
   if (typeof name !== "string" || !name.trim()) return error(400, "name is required.");
   if (!phone) return error(400, "phone must be a full number, like +265991234567 or 0991234567.");
-  if (!CROPS.includes(crop as Crop)) return error(400, `crop must be one of ${CROPS.join(", ")}.`);
   if (typeof latitude !== "number" || typeof longitude !== "number" || !inBounds(latitude, longitude)) {
     return error(400, "latitude and longitude must be numbers inside Malawi.");
   }
@@ -220,7 +217,6 @@ async function addFarmer(request: Request, store: Store, now: () => Date): Promi
     name: name.trim(),
     farm_name: typeof farm_name === "string" ? farm_name.trim() : null,
     phone,
-    crop: crop as Crop,
     latitude,
     longitude,
     lang: (lang as Lang | undefined) ?? null,

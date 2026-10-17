@@ -322,7 +322,7 @@ var seenIds = {};
 var select = document.getElementById("farmer");
 var thread = document.getElementById("thread");
 var HEADER = /^.+ · \\d+ (of|mwa) 8$/;
-var OPTION = /^(\\d) (.+)$/;
+var OPTION = /^(\\d+) (.+)$/;
 var NS = "http://www.w3.org/2000/svg";
 
 function svgIcon(viewBox, paths, cls) {
@@ -448,7 +448,7 @@ gate(function () {
   api("/farmers").then(function (d) {
     farmers = d.farmers;
     farmers.forEach(function (f) {
-      append(select, el("option", { value: f.id }, f.name + " · " + f.crop + (f.farm_name ? " · " + f.farm_name : "")));
+      append(select, el("option", { value: f.id }, f.name + (f.farm_name ? " · " + f.farm_name : "")));
     });
     choose(new URLSearchParams(location.search).get("farmer") || store("fieldwise-sim-farmer"));
     setInterval(refresh, 1500);
@@ -547,7 +547,6 @@ function shortName(name) {
   return last.toUpperCase() + " " + w.map(function (x) { return x[0].toUpperCase() + "."; }).join(" ");
 }
 function cap(s) { return s ? s[0].toUpperCase() + s.slice(1) : s; }
-var PLURAL = { tomato: "tomatoes", maize: "maize", beans: "beans", cabbage: "cabbages" };
 function list(items) { return items.length > 1 ? items.slice(0, -1).join(", ") + " and " + items[items.length - 1] : items[0]; }
 
 /** What the answers mean, in one line for Felix. */
@@ -570,14 +569,14 @@ function visit(f) {
     ? el("div", { class: "why" }, "Flagged " + f.flagged + " → ", el("em", {}, list(r.answersSay)))
     : el("div", { class: "why" }, "Flagged " + f.flagged);
   var state = f.state === "answered" ? "Answered" : f.state === "answering" ? "Answering, " + f.answered + " of 8" + (f.provisional ? " so far" : "")
-    : f.state === "no_response" ? "No reply after a reminder" : f.queued ? "Queued behind the current questions" : "Alert sent, no answers yet";
+    : f.state === "no_response" ? "No reply after a reminder" : f.queued ? "Alert sent, farmer hasn't started it yet" : "Alert sent, no answers yet";
   var node = el("button", { type: "button", class: "visit r-" + f.rank + (openId === f.flag_id ? " open" : ""),
       on: { click: function () { openId = openId === f.flag_id ? null : f.flag_id; node.classList.toggle("open"); } } },
-    el("div", { class: "top" }, el("b", {}, shortName(f.farmer.name)), el("span", { class: "crop" }, cap(f.farmer.crop)), el("span", { class: "chip " + f.rank }, RANK_LABEL[f.rank])),
+    el("div", { class: "top" }, el("b", {}, shortName(f.farmer.name)), el("span", { class: "crop" }, cap(f.crop)), el("span", { class: "chip " + f.rank }, RANK_LABEL[f.rank])),
     why,
     el("div", { class: "state" }, state),
     f.also.length > 0 && el("div", { class: "state" }, "Also: " + f.also.map(function (a) {
-      return a.flagged + (a.queued ? " (queued)" : a.state === "answered" ? " (answered)" : "");
+      return cap(a.crop) + ": " + a.flagged + (a.state === "answered" ? " (answered)" : a.state === "answering" ? " (answering)" : "");
     }).join(", ")),
     el("div", { class: "more" },
       el("div", {}, verdict(f)),
@@ -602,7 +601,7 @@ function draw(farms) {
   append(body, el("div", { class: "hero" + (urgent.length ? " urgent" : "") },
     el("small", {}, urgent.length ? "Visit now" : "Flagged farms"),
     el("b", {}, urgent.length ? urgent.length : farms.length),
-    el("span", {}, "Next: " + shortName(next.farmer.name) + " · " + cap(next.farmer.crop) + " · " + RANK_LABEL[next.rank])));
+    el("span", {}, "Next: " + shortName(next.farmer.name) + " · " + cap(next.crop) + " · " + RANK_LABEL[next.rank])));
   append(body, el("div", { class: "section" }, "Your visits"));
   farms.forEach(function (f) {
     var key = [f.rank, f.state, f.answered].join("|");
@@ -628,10 +627,10 @@ function notify(farms) {
     var raised = Object.keys(now).filter(function (id) { return !seen[id]; });
     if (finished.length) {
       var f = finished[0];
-      banner(shortName(f.farmer.name) + " · " + cap(f.farmer.crop), verdict(f));
+      banner(shortName(f.farmer.name) + " · " + cap(f.crop), verdict(f));
     } else if (turnedUrgent.length) {
       var u = turnedUrgent[0];
-      banner("Urgent · " + shortName(u.farmer.name) + " · " + cap(u.farmer.crop),
+      banner("Urgent · " + shortName(u.farmer.name) + " · " + cap(u.crop),
         "Answers so far point to " + list(u.report.answersSay) + ". Go now.");
     } else if (raised.length) {
       var farmsRaised = farms.filter(function (f) {
@@ -639,7 +638,7 @@ function notify(farms) {
       });
       var one = farmsRaised[0];
       banner("Weather alert · Kasungu", farmsRaised.length === 1
-        ? shortName(one.farmer.name) + "'s " + (PLURAL[one.farmer.crop] || one.farmer.crop) + " flagged for " + list(raised.map(function (id) { return names[id]; }).sort()) + ". The farmer has been asked to check."
+        ? shortName(one.farmer.name) + "'s crops flagged for " + list(raised.map(function (id) { return names[id]; }).sort()) + ". The farmer has been asked to check."
         : raised.length + " disease flags on " + farmsRaised.length + " farms. Farmers have been asked to check their crops.");
     }
   }
@@ -808,13 +807,13 @@ function card(f) {
     append(verdict, [el("span", { class: "arrow" }, "→"), el("span", { class: "say" }, "Answers point away from the flag")]);
   }
   var progress = f.state === "answered" ? "Answered" : f.state === "answering" ? "Answering " + f.answered + " of 8" + (f.provisional ? " · provisional" : "")
-    : f.queued ? "Queued behind the farmer's current questions" : STATE_LABEL[f.state];
+    : f.queued && f.state === "waiting" ? "Alert sent, farmer hasn't started it yet" : STATE_LABEL[f.state];
   var notes = (r && r.notes) || [];
   var key = JSON.stringify([f.flag_id, f.rank, f.answered, f.state, f.also.length]);
   var node = el("article", { class: "card r-" + f.rank, "data-key": key },
     el("div", { class: "head" },
       el("span", { class: "name" }, shortName(f.farmer.name)),
-      el("span", { class: "tag" }, cap(f.farmer.crop)),
+      el("span", { class: "tag" }, cap(f.crop)),
       f.farmer.farm_name && el("span", { class: "farm" }, f.farmer.farm_name),
       f.source === "scenario" && el("span", { class: "tag" }, "Scenario"),
       el("span", { class: "chip " + f.rank }, RANK_LABEL[f.rank])),
@@ -823,7 +822,7 @@ function card(f) {
     r && r.answerLine && el("div", { class: "answers" }, r.answerLine),
     el("div", { class: "meta" }, f.conditions && el("span", {}, f.conditions), el("span", {}, "Flagged " + when(f.raised_at) + (f.reason !== "new" ? " (" + f.reason + ")" : ""))),
     notes.length > 0 && el("ul", { class: "notes" }, notes.map(function (n) { return el("li", {}, n); })),
-    f.also.length > 0 && el("div", { class: "meta", style: "margin-top:6px" }, "Also flagged: " + f.also.map(function (a) { return a.flagged + " (" + RANK_LABEL[a.rank].toLowerCase() + ")"; }).join(", ")));
+    f.also.length > 0 && el("div", { class: "meta", style: "margin-top:6px" }, "Also flagged: " + f.also.map(function (a) { return cap(a.crop) + ": " + a.flagged + " (" + RANK_LABEL[a.rank].toLowerCase() + ")"; }).join(", ")));
   if (!firstLoad && seen[f.farmer.id] !== key) node.classList.add("changed");
   seen[f.farmer.id] = key;
   return node;
@@ -848,7 +847,7 @@ function draw(priority, summary) {
   var flagged = {};
   priority.farms.forEach(function (f) { flagged[f.farmer.id] = true; });
   var rest = farmers.filter(function (f) { return !flagged[f.id]; });
-  document.getElementById("unflagged").textContent = rest.length ? "Not flagged: " + rest.map(function (f) { return f.name + " (" + f.crop + ")"; }).join(", ") + "." : "";
+  document.getElementById("unflagged").textContent = rest.length ? "Not flagged: " + rest.map(function (f) { return f.name; }).join(", ") + "." : "";
 
   var answered = summary.states.answered || 0;
   var outcomes = document.getElementById("outcomes");
@@ -945,7 +944,7 @@ gate(function () {
   api("/farmers").then(function (d) {
     farmers = d.farmers;
     var target = document.getElementById("target");
-    farmers.forEach(function (f) { append(target, el("option", { value: f.id }, f.name + " · " + f.crop)); });
+    farmers.forEach(function (f) { append(target, el("option", { value: f.id }, f.name)); });
     refresh();
     // Same pace as Felix's phone, so both update together on stage.
     setInterval(refresh, 2000);
@@ -1001,7 +1000,7 @@ gate(function () {
   var farmers = [];
   api("/farmers").then(function (d) {
     farmers = d.farmers;
-    farmers.forEach(function (f) { append(target, el("option", { value: f.id }, f.name + " · " + f.crop)); });
+    farmers.forEach(function (f) { append(target, el("option", { value: f.id }, f.name)); });
     // Follow the farmer shown on the phone, so a wet spell lands on that phone.
     var shown = store("fieldwise-sim-farmer");
     if (shown) target.value = shown;

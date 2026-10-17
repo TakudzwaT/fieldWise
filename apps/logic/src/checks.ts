@@ -1,6 +1,7 @@
-// Forecast checks: each farm's crop and location go to the weather API's
-// /assess, and each disease's status goes through the trigger. A change into
-// "flag" raises a flag, which alerts the farmer.
+// Forecast checks: each farm's location goes to the weather API's /assess for
+// every crop, and each disease's status goes through the trigger. A change into
+// "flag" raises a flag. A farm's new flags go out together as one alert, and
+// the farmer picks which at-risk plant to report on.
 //
 // Scenario mode puts a made-up wet or dry spell through the same rule code
 // (imported from the weather API, not copied), so a flag can be shown firing
@@ -11,7 +12,8 @@ import type { Soil } from "../../api/src/soil";
 import { windowMetrics } from "../../api/src/window";
 import type { Hour } from "../../api/src/summarize";
 import type { Conversations } from "./conversation";
-import type { DiseaseId } from "./questionnaires";
+import { CROPS, type DiseaseId } from "./questionnaires";
+import type { Raise } from "./conversation";
 import { trackKey, type Farmer, type FlagDetails, type FlagSource, type Store } from "./store";
 import { evaluate, severity, type Alert, type Status, type Track } from "./trigger";
 
@@ -51,7 +53,6 @@ export function weatherApi(baseUrl: string): WeatherClient {
       const params = new URLSearchParams({
         lat: String(farmer.latitude),
         lon: String(farmer.longitude),
-        crop: farmer.crop,
         hours: String(CHECK_HOURS),
       });
       const response = await fetch(`${baseUrl}/assess?${params}`);
@@ -98,12 +99,12 @@ export async function apply(
   const known = tracks ?? (await store.listTracks());
   const out: CheckResult[] = [];
   const saves: { farmerId: string; disease: DiseaseId; track: Track }[] = [];
+  const raised: Raise[] = [];
   for (const result of assessment.results) {
     const key = trackKey(farmer.id, result.disease);
     const { track, alert } = evaluate(known.get(key), result.status, severity(result.disease, assessment.window), now);
     known.set(key, track);
     saves.push({ farmerId: farmer.id, disease: result.disease, track });
-    let flag: string | undefined;
     if (alert) {
       const details: FlagDetails = {
         conditions: result.conditions,
@@ -113,42 +114,43 @@ export async function apply(
         rain_mm: assessment.window.rain_total,
         drainage: assessment.soil?.drainage ?? null,
       };
-      flag = (await conversations.raise(farmer, result.disease, alert, source, details)).id;
+      raised.push({ disease: result.disease, reason: alert, source, details });
     }
-    out.push({ farmer: farmer.id, disease: result.disease, status: result.status, alert, ...(flag ? { flag } : {}) });
+    out.push({ farmer: farmer.id, disease: result.disease, status: result.status, alert });
   }
   await store.saveTracks(saves, now.toISOString());
+  if (raised.length) {
+    const flags = await conversations.raise(farmer, raised);
+    for (const r of out) {
+      const flag = flags.find((f) => f.disease === r.disease);
+      if (flag) r.flag = flag.id;
+    }
+  }
   return out;
 }
 
 export type ScenarioWeather = "wet" | "dry";
 
 /**
- * A made-up 72-hour spell for a farm's crop, assessed with the weather API's
- * own rules. "wet" is set to raise every flag for that crop; "dry" clears them
- * all, which re-arms the trigger for the next wet spell.
+ * A made-up 72-hour spell, assessed for every crop with the weather API's own
+ * rules. "wet" is a mild wet spell on poorly drained soil, which puts all four
+ * crops at risk (late blight, maize leaf blights, bean leaf diseases and
+ * clubroot); "dry" clears every disease, which re-arms the trigger for the next
+ * wet spell.
  */
-export function scenarioAssessment(farmer: Farmer, weather: ScenarioWeather, now: Date): Assessment {
+export function scenarioAssessment(weather: ScenarioWeather, now: Date): Assessment {
   const wet = weather === "wet";
-  // Each crop's diseases want different temperatures (late blight 16-21 °C,
-  // black rot 25-35 °C), so the wet spell is tuned per crop.
-  const temps: Record<Farmer["crop"], { air: number; soil: number }> = {
-    tomato: { air: 19, soil: 30 },
-    maize: { air: 22, soil: 24 },
-    beans: { air: 20, soil: 23 },
-    cabbage: { air: 27, soil: 22 },
-  };
   const hours: Hour[] = [];
   const start = Math.floor(now.getTime() / 3_600_000) * 3_600_000 + 2 * 3_600_000; // Malawi local time
   for (let i = 0; i < CHECK_HOURS; i++) {
     const rain = wet && i % 3 === 0 ? 1.2 : 0;
     hours.push({
       time: new Date(start + i * 3_600_000).toISOString().slice(0, 16),
-      temperature_2m: wet ? temps[farmer.crop].air : 33,
+      temperature_2m: wet ? 20 : 33,
       relative_humidity_2m: wet ? 95 : 40,
       precipitation: rain,
       rain,
-      soil_temperature_6cm: wet ? temps[farmer.crop].soil : 26,
+      soil_temperature_6cm: wet ? 23 : 26,
       leaf_wetness_probability: wet ? 85 : 0,
     });
   }
@@ -156,5 +158,5 @@ export function scenarioAssessment(farmer: Farmer, weather: ScenarioWeather, now
     ? { ph: 6.2, clay_pct: 38, sand_pct: 30, silt_pct: 32, drainage: "poor", drainage_basis: "Scenario, not measured." }
     : { ph: 7.5, clay_pct: 12, sand_pct: 70, silt_pct: 18, drainage: "good", drainage_basis: "Scenario, not measured." };
   const window = windowMetrics(hours);
-  return { window, soil, results: assess([farmer.crop], { weather: window, soil }) as Assessment["results"] };
+  return { window, soil, results: assess([...CROPS], { weather: window, soil }) as Assessment["results"] };
 }

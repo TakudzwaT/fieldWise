@@ -37,33 +37,44 @@ describe("http", () => {
 
   it("registers a farmer and rejects bad input", async () => {
     const call = client();
-    const good = { name: "Alinafe Kumwenda", phone: "0991 234 567", crop: "beans", latitude: -13.05, longitude: 33.5 };
+    const good = { name: "Alinafe Kumwenda", phone: "0991 234 567", latitude: -13.05, longitude: 33.5 };
     const created = await call("POST", "/farmers", good);
     expect(created.status).toBe(201);
     expect(created.body.farmer).toMatchObject({ phone: "+265991234567", channel: "whatsapp", lang: null });
     expect((await call("POST", "/farmers", good)).status).toBe(409);
-    expect((await call("POST", "/farmers", { ...good, phone: "+265991234568", crop: "rice" })).status).toBe(400);
+    expect((await call("POST", "/farmers", { ...good, phone: "+265991234568", lang: "fr" })).status).toBe(400);
     expect((await call("POST", "/farmers", { ...good, phone: "+265991234568", latitude: -30 })).status).toBe(400);
   });
 
   it("runs a demo scenario and the farmer answers through /inbound", async () => {
     const call = client();
     const scenario = await call("POST", "/demo/scenario", { weather: "wet", farmer_id: "F014" });
-    expect(scenario.body.results).toMatchObject([{ disease: "maize_leaf_blights", status: "flag", alert: "new" }]);
+    expect(scenario.body.results.filter((r: { alert: string | null }) => r.alert).map((r: { disease: string }) => r.disease)).toEqual([
+      "late_blight",
+      "maize_leaf_blights",
+      "bean_leaf_diseases",
+      "clubroot",
+    ]);
 
-    const first = await call("POST", "/inbound", { phone: "+2650000000014", text: "2" });
+    const list = await call("POST", "/inbound", { phone: "+2650000000014", text: "2" });
+    expect(list.body.replies[0]).toBe("Kodi mukufuna kutiuza za mbewu iti?\n1 Matimati\n2 Chimanga\n3 Nyemba\n4 Kabichi");
+    const first = await call("POST", "/inbound", { phone: "+2650000000014", text: "2", screen: "pick" });
     expect(first.body.replies[0]).toBe("Chimanga chanu · 1 mwa 8\nKodi masamba apansi ali ndi mizere yaitali yotsatira utali wa tsamba?\n1 Inde\n2 Ayi");
 
     const { body } = await call("GET", "/farmers/F014");
-    expect(body.flags[0]).toMatchObject({ disease: "maize_leaf_blights", source: "scenario", session: { status: "active", step: 0 } });
+    expect(body.flags.find((f: { disease: string }) => f.disease === "maize_leaf_blights")).toMatchObject({
+      source: "scenario",
+      session: { status: "active", step: 0 },
+    });
+    expect(body.flags.find((f: { disease: string }) => f.disease === "clubroot")).toMatchObject({ session: { status: "offered" } });
     const messages = await call("GET", "/farmers/F014/messages");
-    expect(messages.body.messages.map((m: { direction: string }) => m.direction)).toEqual(["out", "out", "in", "out"]);
+    expect(messages.body.messages.map((m: { direction: string }) => m.direction)).toEqual(["out", "out", "in", "out", "in", "out"]);
   });
 
-  it("raises a manual flag only for a disease of the farmer's crop", async () => {
+  it("raises a manual flag for a known disease", async () => {
     const call = client();
-    expect((await call("POST", "/flags", { farmer_id: "F014", disease: "clubroot" })).status).toBe(400);
-    const flag = await call("POST", "/flags", { farmer_id: "F062", disease: "clubroot" });
+    expect((await call("POST", "/flags", { farmer_id: "F014", disease: "rust" })).status).toBe(400);
+    const flag = await call("POST", "/flags", { farmer_id: "F014", disease: "clubroot" });
     expect(flag.status).toBe(201);
     expect(flag.body.flag).toMatchObject({ reason: "manual", source: "manual", status: "awaiting" });
   });
@@ -101,7 +112,7 @@ describe("felix and demo routes", () => {
     expect(priority.body.farms).toHaveLength(1);
     expect(priority.body.farms[0]).toMatchObject({ rank: "waiting", source: "scenario", farmer: { id: "F062" } });
     const s = await call("GET", "/felix/summary");
-    expect(s.body).toMatchObject({ days: 14, flags: 2, flagged_farms: 1, scenario_flags: 2 });
+    expect(s.body).toMatchObject({ days: 14, flags: 4, flagged_farms: 1, scenario_flags: 4 });
     expect((await call("GET", "/felix/summary?days=0")).status).toBe(400);
   });
 

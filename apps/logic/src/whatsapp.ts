@@ -5,10 +5,12 @@
 //                   checked against the X-Hub-Signature-256 HMAC of the raw
 //                   body with the app secret; anything else is refused.
 //
-// Questions go out as interactive messages with Yes/No reply buttons. Those are
-// only allowed within 24 hours of the farmer's last message; outside that,
-// WhatsApp fails the message with code 131047, and if a template is
-// configured FieldWise sends it instead so the farmer can tap Start.
+// Questions go out as interactive messages with Yes/No reply buttons. The
+// "which plant?" list is buttons too, or a list message when more than three
+// plants are at risk. These are only allowed within 24 hours of the farmer's
+// last message; outside that, WhatsApp fails the message with code 131047,
+// and if a template is configured FieldWise sends it instead so the farmer can
+// tap Start.
 
 import type { Prompt } from "./engine";
 import { normalizePhone } from "./phone";
@@ -16,7 +18,6 @@ import type { Deliver, Outgoing } from "./outbox";
 import { NAMED } from "../../api/src/cells";
 import { newId, type Conversations } from "./conversation";
 import { NOT_REGISTERED, stoppedText } from "./messages";
-import { CROP_LABEL, type Crop } from "./questionnaires";
 import type { Farmer, Store } from "./store";
 
 export interface WhatsAppEnv {
@@ -48,6 +49,9 @@ export const TEMPLATE_PREFIX = "[template ";
 const HEADER_MAX = 60;
 const BODY_MAX = 1024;
 const BUTTON_TITLE_MAX = 20;
+const ROW_TITLE_MAX = 24;
+const LIST_ROWS_MAX = 10;
+const LIST_BUTTON = "Choose / Sankhani";
 const TEXT_MAX = 4096;
 
 /** Sending is configured when there is a token and a phone number id. */
@@ -74,10 +78,27 @@ export class WhatsAppError extends Error {
 /** The WhatsApp message body for one outgoing message. */
 export function payload(to: string, message: Outgoing): Record<string, unknown> {
   const base = { messaging_product: "whatsapp", recipient_type: "individual", to: to.replace(/^\+/, "") };
-  if (typeof message === "string" || message.options.length === 0 || message.options.length > 3) {
+  if (typeof message === "string" || message.options.length === 0 || message.options.length > LIST_ROWS_MAX) {
     return { ...base, type: "text", text: { body: clip(plain(message), TEXT_MAX), preview_url: false } };
   }
   const prompt: Prompt = message;
+  if (prompt.options.length > 3) {
+    return {
+      ...base,
+      type: "interactive",
+      interactive: {
+        type: "list",
+        ...(prompt.header ? { header: { type: "text", text: clip(prompt.header, HEADER_MAX) } } : {}),
+        body: { text: clip(prompt.body, BODY_MAX) },
+        action: {
+          button: LIST_BUTTON,
+          sections: [
+            { rows: prompt.options.map((o) => ({ id: `${prompt.key}:${o.reply}`, title: clip(o.label, ROW_TITLE_MAX) })) },
+          ],
+        },
+      },
+    };
+  }
   return {
     ...base,
     type: "interactive",
@@ -105,7 +126,7 @@ export function templatePayload(config: WhatsAppConfig, farmer: Farmer): Record<
     template: {
       name: config.template,
       language: { code: config.templateLang },
-      components: [{ type: "body", parameters: [{ type: "text", text: cropWord(farmer.crop) }] }],
+      components: [{ type: "body", parameters: [{ type: "text", text: "crops" }] }],
     },
   };
 }
@@ -139,7 +160,7 @@ export async function sendTemplate(
   now: Date,
   fetchFn: typeof fetch = fetch,
 ): Promise<void> {
-  const body = `${TEMPLATE_PREFIX}${config.template}] FieldWise: the weather this week can bring problems to your ${cropWord(farmer.crop)}.`;
+  const body = `${TEMPLATE_PREFIX}${config.template}] FieldWise: the weather this week can bring problems to your crops.`;
   let providerId: string | null = null;
   let error: string | null = null;
   try {
@@ -243,8 +264,8 @@ export function parseWebhook(body: unknown): { messages: Inbound[]; receipts: Re
         // Voice notes, photos and the like still count as the farmer getting in
         // touch; they get the current screen again.
         const message: Inbound = { id: String(m.id), phone, text: typeof text === "string" ? text : "", name: names.get(String(m.from)) ?? null };
-        // Our buttons' ids are "<screen>:<reply>", e.g. "s3:1".
-        const tagged = m.type === "interactive" ? /^(lang|s\d+):(\d)$/.exec(message.text) : null;
+        // Our buttons' and list rows' ids are "<screen>:<reply>", e.g. "s3:1" or "pick:2".
+        const tagged = m.type === "interactive" ? /^(lang|pick|more|s\d+):(\d+)$/.exec(message.text) : null;
         if (tagged) {
           message.screen = tagged[1];
           message.text = tagged[2];
@@ -324,8 +345,7 @@ async function stop(farmer: Farmer, { store, config }: WebhookDeps, fetchFn: typ
 /** A message from a number that isn't registered: join, or say how to. */
 async function stranger(message: Inbound, { store, config, openJoin, now }: WebhookDeps, fetchFn: typeof fetch): Promise<void> {
   if (!config) return;
-  const crop = openJoin ? parseJoin(message.text) : undefined;
-  if (!crop) {
+  if (!openJoin || !parseJoin(message.text)) {
     const reply = openJoin ? JOIN_HELP : NOT_REGISTERED;
     // Not logged: there is no farmer to log it against.
     await post(config, payload(message.phone, reply), fetchFn).catch((err) => console.error("Reply to stranger failed", err));
@@ -337,7 +357,6 @@ async function stranger(message: Inbound, { store, config, openJoin, now }: Webh
     name: (message.name ?? "").trim().slice(0, 60) || "WhatsApp farmer",
     farm_name: null,
     phone: message.phone,
-    crop,
     latitude,
     longitude,
     lang: null,
@@ -347,7 +366,7 @@ async function stranger(message: Inbound, { store, config, openJoin, now }: Webh
   await store.addFarmer(farmer);
   await store.logMessage({ farmer_id: farmer.id, direction: "in", channel: "whatsapp", body: message.text, at: now().toISOString() });
   const deliver = whatsappDeliver(config, fetchFn);
-  const body = joinedText(farmer.name, crop);
+  const body = joinedText(farmer.name);
   let providerId: string | null = null;
   let error: string | null = null;
   try {
@@ -369,42 +388,20 @@ async function stranger(message: Inbound, { store, config, openJoin, now }: Webh
 
 // Joining by WhatsApp
 
-const CROP_WORDS: Record<string, Crop> = {
-  tomato: "tomato",
-  tomatoes: "tomato",
-  matimati: "tomato",
-  maize: "maize",
-  corn: "maize",
-  chimanga: "maize",
-  bean: "beans",
-  beans: "beans",
-  nyemba: "beans",
-  cabbage: "cabbage",
-  cabbages: "cabbage",
-  kabichi: "cabbage",
-};
-
-/** "join tomato" -> "tomato"; "join" alone -> null; anything else -> undefined. */
-export function parseJoin(text: string): Crop | null | undefined {
-  const words = text.trim().toLowerCase().split(/\s+/);
-  if (words[0] !== "join" && words[0] !== "lowani") return undefined;
-  return CROP_WORDS[words[1] ?? ""] ?? null;
+/** "join", or "join" with anything after it (an old "join tomato" still works). */
+export function parseJoin(text: string): boolean {
+  const first = text.trim().toLowerCase().split(/\s+/)[0];
+  return first === "join" || first === "lowani";
 }
 
 export const JOIN_HELP =
-  "FieldWise: to join, reply JOIN and your crop: JOIN TOMATO, JOIN MAIZE, JOIN BEANS or JOIN CABBAGE.\n\n" +
-  "FieldWise: kuti mulowe, yankhani JOIN ndi mbewu yanu: JOIN MATIMATI, JOIN CHIMANGA, JOIN NYEMBA kapena JOIN KABICHI.";
+  "FieldWise: to join, reply JOIN.\n\n" + "FieldWise: kuti mulowe, yankhani JOIN.";
 
-export const joinedText = (name: string, crop: Crop) =>
-  `FieldWise: welcome, ${name}. You are registered with ${cropWord(crop)} near Kasungu. ` +
-  "We will message you when the weather puts your crop at risk. Text STOP at any time to stop.\n\n" +
-  `FieldWise: takulandirani, ${name}. Mwalembetsedwa ndi ${CROP_LABEL[crop].ny.toLowerCase()} pafupi ndi Kasungu. ` +
+export const joinedText = (name: string) =>
+  `FieldWise: welcome, ${name}. You are registered near Kasungu. ` +
+  "We will message you when the weather puts your crops at risk. Text STOP at any time to stop.\n\n" +
+  `FieldWise: takulandirani, ${name}. Mwalembetsedwa pafupi ndi Kasungu. ` +
   "Tidzakutumizirani uthenga nyengo ikaika mbewu zanu pachiopsezo. Tumizani STOP nthawi iliyonse kuti musiye.";
-
-/** "tomatoes", "maize", "beans", "cabbages". */
-function cropWord(crop: Crop): string {
-  return CROP_LABEL[crop].en.replace(/^Your /, "").toLowerCase();
-}
 
 function plain(message: Outgoing): string {
   if (typeof message === "string") return message;

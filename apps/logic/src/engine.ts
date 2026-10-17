@@ -61,6 +61,32 @@ const NO = new Set(["2", "no", "n", "ayi", "iyayi"]);
 const ENGLISH = new Set(["1", "english", "en", "eng"]);
 const CHICHEWA = new Set(["2", "chichewa", "chewa", "ny", "nyanja"]);
 
+/** true for yes, false for no, null when the reply is neither. */
+export function parseYesNo(input: string): boolean | null {
+  const word = normalize(input);
+  return YES.has(word) ? true : NO.has(word) ? false : null;
+}
+
+/** The language a reply picks, or null. */
+export function parseLanguage(input: string): Lang | null {
+  const word = normalize(input);
+  return ENGLISH.has(word) ? "en" : CHICHEWA.has(word) ? "ny" : null;
+}
+
+/** The language screen, shown before anything else to a farmer who hasn't picked one. */
+export function languagePrompt(retry = false): Prompt {
+  const body = retry ? `${MESSAGES.retry.en}\n${MESSAGES.chooseLanguage}` : MESSAGES.chooseLanguage;
+  return { key: "lang", body, options: [{ reply: "1", label: "English" }, { reply: "2", label: "Chichewa" }] };
+}
+
+/** Yes and No in a language, as reply options. */
+export function yesNo(lang: Lang): Prompt["options"] {
+  return [
+    { reply: "1", label: MESSAGES.yes[lang] },
+    { reply: "2", label: MESSAGES.no[lang] },
+  ];
+}
+
 /** A new session. Pass the farmer's language if it is already known. */
 export function start(disease: DiseaseId, lang: Lang | null = null): Turn {
   const session: Session = { disease, lang, step: 0, answers: [] };
@@ -70,10 +96,9 @@ export function start(disease: DiseaseId, lang: Lang | null = null): Turn {
 /** Apply one reply from the farmer and return the next screen. */
 export function reply(current: Session, input: string): Turn {
   const session: Session = structuredClone(current);
-  const word = normalize(input);
 
   if (session.lang === null) {
-    const lang = ENGLISH.has(word) ? "en" : CHICHEWA.has(word) ? "ny" : null;
+    const lang = parseLanguage(input);
     if (!lang) return { session, prompt: render(session, true), done: false, retry: true };
     session.lang = lang;
     return { session, prompt: render(session), done: false, retry: false };
@@ -81,7 +106,7 @@ export function reply(current: Session, input: string): Turn {
 
   if (session.step >= STEPS) return { session, prompt: render(session), done: true, retry: false };
 
-  const answer = YES.has(word) ? true : NO.has(word) ? false : null;
+  const answer = parseYesNo(input);
   if (answer === null) return { session, prompt: render(session, true), done: false, retry: true };
 
   const index = Math.floor(session.step / 2);
@@ -101,10 +126,7 @@ export function screenKey(session: Session): string {
 /** The screen for the session's current step. */
 export function render(session: Session, retry = false): Prompt {
   const key = screenKey(session);
-  if (session.lang === null) {
-    const body = retry ? `${MESSAGES.retry.en}\n${MESSAGES.chooseLanguage}` : MESSAGES.chooseLanguage;
-    return { key, body, options: [{ reply: "1", label: "English" }, { reply: "2", label: "Chichewa" }] };
-  }
+  if (session.lang === null) return languagePrompt(retry);
   const lang = session.lang;
   if (session.step >= STEPS) return { key, body: MESSAGES.thanks[lang], options: [] };
 
@@ -119,10 +141,7 @@ export function render(session: Session, retry = false): Prompt {
     key,
     header: `${CROP_LABEL[questionnaire.crop][lang]} · ${session.step + 1} ${MESSAGES.of[lang]} ${STEPS}`,
     body: retry ? `${MESSAGES.retry[lang]}\n${text}` : text,
-    options: [
-      { reply: "1", label: MESSAGES.yes[lang] },
-      { reply: "2", label: MESSAGES.no[lang] },
-    ],
+    options: yesNo(lang),
   };
 }
 
@@ -132,6 +151,6 @@ export function toText(prompt: Prompt): string {
   return lines.filter(Boolean).join("\n");
 }
 
-function normalize(input: string): string {
+export function normalize(input: string): string {
   return input.trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 }

@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { Conversations } from "../src/conversation";
 import { conditionsLine, priorityList, shortName, summary } from "../src/felix";
 import { Outbox } from "../src/outbox";
-import { Store, type Farmer } from "../src/store";
+import type { DiseaseId } from "../src/questionnaires";
+import { Store, type Farmer, type FlagDetails, type FlagReason, type FlagSource } from "../src/store";
 import { testDb } from "./d1";
 
 const HOUR = 60 * 60 * 1000;
@@ -18,18 +19,16 @@ beforeEach(() => {
 });
 
 const farmer = async (id: string) => (await store.getFarmer(id)) as Farmer;
+const raise = async (id: string, disease: DiseaseId, reason: FlagReason = "new", source: FlagSource = "forecast", details: FlagDetails = {}) =>
+  conversations.raise(await farmer(id), [{ disease, reason, source, details }]);
 async function answer(phone: string, pattern: string) {
   for (const ch of pattern.replace(/\s/g, "")) await conversations.inbound(phone, ch === "Y" ? "1" : ch === "N" ? "2" : ch);
 }
 
 describe("Felix's priority list", () => {
   it("reproduces the document's example line", async () => {
-    await conversations.raise(await farmer("F056"), "late_blight", "new", "forecast", {
-      soil_temp: 31,
-      drainage: "poor",
-      leaf_wet_hours: 14,
-    });
-    await answer("+2650000000056", "1 NN NN NN YY");
+    await raise("F056", "late_blight", "new", "forecast", { soil_temp: 31, drainage: "poor", leaf_wet_hours: 14 });
+    await answer("+2650000000056", "1 1 NN NN NN YY");
     const [line] = priorityList(await store.flagRows());
     expect(line.text).toBe(
       [
@@ -43,22 +42,22 @@ describe("Felix's priority list", () => {
 
   it("sorts urgent first, then this week, no response, re-check and waiting", async () => {
     // Tomato F084: silent through a reminder -> no response.
-    await conversations.raise(await farmer("F084"), "late_blight", "new", "forecast", {});
+    await raise("F084", "late_blight", "new", "forecast");
     clock = new Date(clock.getTime() + 25 * HOUR);
     await conversations.sweep();
     clock = new Date(clock.getTime() + 25 * HOUR);
     await conversations.sweep();
     // Maize: confirmed, limited spread -> this week.
-    await conversations.raise(await farmer("F014"), "maize_leaf_blights", "new", "forecast", {});
-    await answer("+2650000000014", "1 YY YY NN NN");
+    await raise("F014", "maize_leaf_blights", "new", "forecast");
+    await answer("+2650000000014", "1 1 YY YY NN NN");
     // Beans: early signs only -> re-check.
-    await conversations.raise(await farmer("F027"), "bean_leaf_diseases", "new", "forecast", {});
-    await answer("+2650000000027", "1 NY NN NN NN");
+    await raise("F027", "bean_leaf_diseases", "new", "forecast");
+    await answer("+2650000000027", "1 1 NY NN NN NN");
     // Cabbage: alert sent, nothing answered -> waiting.
-    await conversations.raise(await farmer("F062"), "black_rot", "new", "forecast", {});
+    await raise("F062", "black_rot", "new", "forecast");
     // Maize F043: streak virus answered mid-way -> provisional go now.
-    await conversations.raise(await farmer("F043"), "maize_leaf_blights", "new", "forecast", {});
-    await answer("+2650000000043", "1 NN NN NN Y");
+    await raise("F043", "maize_leaf_blights", "new", "forecast");
+    await answer("+2650000000043", "1 1 NN NN NN Y");
 
     const lines = priorityList(await store.flagRows());
     expect(lines.map((l) => [l.farmer.id, l.rank])).toEqual([
@@ -73,44 +72,48 @@ describe("Felix's priority list", () => {
   });
 
   it("shows one line per farm, with its other flags listed under it", async () => {
-    const chirwa = await farmer("F062");
-    await conversations.raise(chirwa, "black_rot", "new", "forecast", {});
-    clock = new Date(clock.getTime() + HOUR);
-    await conversations.raise(chirwa, "clubroot", "new", "forecast", {});
+    await raise("F056", "late_blight");
+    await raise("F056", "maize_leaf_blights");
     const lines = priorityList(await store.flagRows());
     expect(lines).toHaveLength(1);
-    // Equally urgent, so the one in front of the farmer leads; the other waits its turn.
-    expect(lines[0].flagged).toBe("black rot");
-    expect(lines[0].also).toEqual([expect.objectContaining({ flagged: "clubroot", state: "waiting", queued: true })]);
+    expect(lines[0].also).toEqual([expect.objectContaining({ crop: expect.any(String), state: "waiting", queued: true })]);
   });
 
   it("leads with the questionnaire in front of the farmer, not one queued behind it", async () => {
-    const banda = await farmer("F056");
-    await conversations.raise(banda, "late_blight", "new", "forecast", {});
-    clock = new Date(clock.getTime() + HOUR);
-    await conversations.raise(banda, "bacterial_wilt", "new", "forecast", {});
+    await raise("F062", "black_rot");
+    await raise("F062", "clubroot");
+    await answer("+2650000000062", "1 1"); // English, cabbages
     const [line] = priorityList(await store.flagRows());
-    expect(line).toMatchObject({ flagged: "late blight", queued: false });
-    expect(line.also).toEqual([expect.objectContaining({ flagged: "bacterial wilt", queued: true })]);
+    expect(line).toMatchObject({ flagged: "black rot", crop: "cabbage", queued: false });
+    expect(line.also).toEqual([expect.objectContaining({ flagged: "clubroot", queued: true })]);
   });
 
   it("leaves out flags merged into an open questionnaire", async () => {
-    const banda = await farmer("F056");
-    await conversations.raise(banda, "late_blight", "new", "forecast", {});
-    await conversations.raise(banda, "late_blight", "worse", "forecast", {});
+    await raise("F056", "late_blight");
+    await raise("F056", "late_blight", "worse");
     const lines = priorityList(await store.flagRows());
     expect(lines).toHaveLength(1);
     expect(lines[0].also).toEqual([]);
+  });
+
+  it("leaves out plants the farmer chose not to report on", async () => {
+    await raise("F056", "late_blight");
+    await raise("F056", "maize_leaf_blights");
+    await answer("+2650000000056", "1 1 NN NN NN NN 2"); // tomatoes, then no more plants
+    const lines = priorityList(await store.flagRows());
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ crop: "tomato", rank: "none", also: [] });
+    expect(summary(await store.flagRows(), 8)).toMatchObject({ flags: 1, response_rate: 1 });
   });
 });
 
 describe("Felix's summary", () => {
   it("counts flags, answers, outcomes and what the answers point to", async () => {
-    await conversations.raise(await farmer("F056"), "late_blight", "new", "scenario", {});
-    await answer("+2650000000056", "1 NN NN NN YY"); // wrong flag: bacterial wilt
-    await conversations.raise(await farmer("F014"), "maize_leaf_blights", "new", "forecast", {});
-    await answer("+2650000000014", "1 YY YY YY NN"); // confirmed urgent: grey leaf spot
-    await conversations.raise(await farmer("F027"), "bean_leaf_diseases", "new", "forecast", {});
+    await raise("F056", "late_blight", "new", "scenario");
+    await answer("+2650000000056", "1 1 NN NN NN YY"); // wrong flag: bacterial wilt
+    await raise("F014", "maize_leaf_blights", "new", "forecast");
+    await answer("+2650000000014", "1 1 YY YY YY NN"); // confirmed urgent: grey leaf spot
+    await raise("F027", "bean_leaf_diseases", "new", "forecast");
 
     const s = summary(await store.flagRows(), 8);
     expect(s).toMatchObject({

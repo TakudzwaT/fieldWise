@@ -8,7 +8,7 @@
 // is listed as "no response", above routine re-checks: a silent farm is not a
 // healthy farm.
 
-import { QUESTIONNAIRES, type DiseaseId } from "./questionnaires";
+import { DISEASES, QUESTIONNAIRES, type Crop, type DiseaseId } from "./questionnaires";
 import { score, type Outcome, type Priority, type Report } from "./scoring";
 import type { FlagRow } from "./store";
 
@@ -29,6 +29,8 @@ export const RANK_LABEL: Record<Rank, string> = {
 export interface Entry {
   flag_id: string;
   disease: DiseaseId;
+  /** The plant the flag is for. */
+  crop: Crop;
   flagged: string;
   raised_at: string;
   reason: string;
@@ -36,7 +38,7 @@ export interface Entry {
   state: State;
   /** Answers given so far, out of 8. */
   answered: number;
-  /** Waiting its turn behind another questionnaire, so not yet sent. */
+  /** Not in front of the farmer yet: their plant isn't picked, or it is behind another questionnaire. */
   queued: boolean;
   rank: Rank;
   /** True while the questionnaire is unfinished and the report is on part of the answers. */
@@ -46,12 +48,12 @@ export interface Entry {
 }
 
 export interface FarmLine extends Entry {
-  farmer: { id: string; name: string; farm_name: string | null; crop: string };
+  farmer: { id: string; name: string; farm_name: string | null };
   label: string;
   /** The document's three-line format. */
   text: string;
   /** Other flags on the same farm in the window, less urgent than this one. */
-  also: Pick<Entry, "flag_id" | "flagged" | "rank" | "state" | "queued">[];
+  also: Pick<Entry, "flag_id" | "crop" | "flagged" | "rank" | "state" | "queued">[];
 }
 
 export function entry({ flag, session }: FlagRow): Entry {
@@ -70,13 +72,14 @@ export function entry({ flag, session }: FlagRow): Entry {
   return {
     flag_id: flag.id,
     disease: flag.disease,
+    crop: QUESTIONNAIRES[flag.disease].crop,
     flagged: QUESTIONNAIRES[flag.disease].name,
     raised_at: flag.raised_at,
     reason: flag.reason,
     source: flag.source,
     state,
     answered: given,
-    queued: session?.status === "queued",
+    queued: session?.status === "queued" || session?.status === "offered",
     rank,
     provisional: !!report && !done,
     report,
@@ -84,11 +87,14 @@ export function entry({ flag, session }: FlagRow): Entry {
   };
 }
 
+/** Flags Felix sees: not those merged into an open questionnaire, nor plants the farmer chose not to report on. */
+const listed = (row: FlagRow) => row.flag.status !== "merged" && row.flag.status !== "skipped";
+
 /** One line per farm with a flag raised since `since`, most urgent first. */
 export function priorityList(rows: FlagRow[]): FarmLine[] {
   const byFarm = new Map<string, { farmer: FlagRow["farmer"]; entries: Entry[] }>();
   for (const row of rows) {
-    if (row.flag.status === "merged") continue;
+    if (!listed(row)) continue;
     const farm = byFarm.get(row.farmer.id) ?? { farmer: row.farmer, entries: [] };
     farm.entries.push(entry(row));
     byFarm.set(row.farmer.id, farm);
@@ -103,7 +109,7 @@ export function priorityList(rows: FlagRow[]): FarmLine[] {
       farmer,
       label: RANK_LABEL[top.rank],
       text: textLine(farmer, top),
-      also: rest.map(({ flag_id, flagged, rank, state, queued }) => ({ flag_id, flagged, rank, state, queued })),
+      also: rest.map(({ flag_id, crop, flagged, rank, state, queued }) => ({ flag_id, crop, flagged, rank, state, queued })),
     });
   }
   return lines.sort(compareEntries);
@@ -127,7 +133,7 @@ export interface Summary {
 }
 
 export function summary(rows: FlagRow[], farmers: number): Summary {
-  const live = rows.filter((r) => r.flag.status !== "merged");
+  const live = rows.filter(listed);
   const entries = live.map(entry);
   const states: Record<State, number> = { answered: 0, answering: 0, waiting: 0, no_response: 0 };
   const outcomes: Record<Outcome, number> = { confirmed_urgent: 0, confirmed: 0, wrong_flag: 0, early_signs: 0, clear: 0 };
@@ -156,8 +162,9 @@ export function summary(rows: FlagRow[], farmers: number): Summary {
     diseases.set(e.disease, d);
   }
 
-  // Asked means the questionnaire reached the farmer, not merely queued.
-  const asked = live.filter((r) => r.session?.started_at).length;
+  // Every listed flag was asked: its plant was on the farmer's list (or, for a
+  // re-check, its questions were sent). Plants the farmer said no to are not listed.
+  const asked = live.length;
   return {
     farmers,
     flagged_farms: new Set(live.map((r) => r.farmer.id)).size,
@@ -175,14 +182,19 @@ export function summary(rows: FlagRow[], farmers: number): Summary {
   };
 }
 
-/** Most urgent first; among equals, the questionnaire in front of the farmer, then the newest. */
+/** Most urgent first; among equals, the questionnaire in front of the farmer, then the newest, then in crop order. */
 function compareEntries(a: Entry, b: Entry): number {
-  return RANKS.indexOf(a.rank) - RANKS.indexOf(b.rank) || Number(a.queued) - Number(b.queued) || b.raised_at.localeCompare(a.raised_at);
+  return (
+    RANKS.indexOf(a.rank) - RANKS.indexOf(b.rank) ||
+    Number(a.queued) - Number(b.queued) ||
+    b.raised_at.localeCompare(a.raised_at) ||
+    DISEASES.indexOf(a.disease) - DISEASES.indexOf(b.disease)
+  );
 }
 
 /** "BANDA J. | Tomato | Flagged: late blight | ANSWERS SAY: bacterial wilt | Urgent", then answers and weather. */
 function textLine(farmer: FlagRow["farmer"], e: Entry): string {
-  const first = [shortName(farmer.name), capitalize(farmer.crop), `Flagged: ${e.flagged}`];
+  const first = [shortName(farmer.name), capitalize(e.crop), `Flagged: ${e.flagged}`];
   if (e.report?.answersSay.length) first.push(`ANSWERS SAY: ${e.report.answersSay.join(" + ")}`);
   else if (e.report?.likelyWrongFlag) first.push(`ANSWERS SAY: likely not ${e.flagged}`);
   first.push(e.rank === "go_now" ? "Urgent" : RANK_LABEL[e.rank]);
