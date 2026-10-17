@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.pytest_cache/
+tests/
+requirements-dev.txt
+local.settings.json
+local.settings.example.json
+deploy.sh
+README.md
+__azurite_db_*
+__blobstorage__/
+__queuestorage__/
