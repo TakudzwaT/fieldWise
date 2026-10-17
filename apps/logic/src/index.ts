@@ -165,7 +165,9 @@ async function route(request: Request, url: URL, env: Env, { store, conversation
     if (body instanceof Response) return body;
     const phone = typeof body.phone === "string" ? normalizePhone(body.phone) : null;
     if (!phone || typeof body.text !== "string") return error(400, "Pass phone and text.");
-    return json({ replies: await conversations.inbound(phone, body.text) });
+    // A button tap from the simulator says which screen its button was on.
+    const screen = typeof body.screen === "string" && /^(lang|s\d)$/.test(body.screen) ? body.screen : undefined;
+    return json({ replies: await conversations.inbound(phone, body.text, { screen }) });
   }
 
   if (url.pathname === "/sweep" && method === "POST") return json(await conversations.sweep());

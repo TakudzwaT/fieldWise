@@ -76,6 +76,8 @@ export interface Message {
   status?: DeliveryStatus | null;
   error?: string | null;
   provider_id?: string | null;
+  /** For a question sent out: its screen (see Prompt.key). */
+  screen?: string | null;
 }
 
 export interface FlagRow {
@@ -339,9 +341,15 @@ export class Store {
     return results.map(toSession);
   }
 
-  /** Delete every flag, session, track and message; farmers stay. For demos. */
+  /**
+   * Delete every flag, session, track and message. Farmers stay, but forget
+   * their language, so the next demo starts with the language question. For demos.
+   */
   async resetActivity(): Promise<void> {
-    await this.db.batch(["flags", "sessions", "tracks", "messages"].map((table) => this.db.prepare(`DELETE FROM ${table}`)));
+    await this.db.batch([
+      ...["flags", "sessions", "tracks", "messages"].map((table) => this.db.prepare(`DELETE FROM ${table}`)),
+      this.db.prepare("UPDATE farmers SET lang = NULL"),
+    ]);
   }
 
   // Messages
@@ -355,8 +363,10 @@ export class Store {
     await this.db.batch(
       messages.map((m) =>
         this.db
-          .prepare("INSERT INTO messages (farmer_id, direction, channel, body, at, status, error, provider_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-          .bind(m.farmer_id, m.direction, m.channel, m.body, m.at, m.status ?? null, m.error ?? null, m.provider_id ?? null),
+          .prepare(
+            "INSERT INTO messages (farmer_id, direction, channel, body, at, status, error, provider_id, screen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          )
+          .bind(m.farmer_id, m.direction, m.channel, m.body, m.at, m.status ?? null, m.error ?? null, m.provider_id ?? null, m.screen ?? null),
       ),
     );
   }

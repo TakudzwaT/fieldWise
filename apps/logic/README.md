@@ -18,12 +18,18 @@ right. Both pages ask for the admin token once and keep it in that browser.
 1. **Wet spell** (dashboard, demo controls) runs a made-up wet spell through
    the real rules. Every farm is flagged and gets an alert.
 2. Answer on the phone, by tapping Yes/No or typing `1`, `2`, `yes`, `inde`.
+   The phone is drawn as a WhatsApp chat: the alert drops in as a
+   notification, questions come with reply buttons in the bubble, FieldWise
+   shows "typing…", and the farmer's replies get ticks. It is a simulation;
+   nothing leaves FieldWise. (Real WhatsApp is built too, below, but needs a
+   Meta account and a deploy.)
 3. The dashboard updates every 3 seconds. A questionnaire still being answered
    is scored on the answers so far and marked *provisional*, so an urgent
    answer (streak virus, say) jumps to the top before the farmer finishes.
 4. **Dry spell** clears the flags and re-arms the alerts, so the next wet spell
-   fires again. **Reset demo** deletes every flag, answer and message (farmers
-   stay).
+   fires again. **Reset demo** deletes every flag, answer and message; farmers
+   stay but forget their language, so the next run starts with the language
+   question.
 
 `/sim` and `/dashboard` also work on their own; `/sim?farmer=F056` opens one
 farmer.
@@ -239,7 +245,7 @@ curl "http://localhost:8787/__scheduled?cron=15+*+*+*+*"
 | `src/whatsapp.ts` | WhatsApp webhook, delivery, joining and the template fallback |
 | `src/phone.ts` | Phone number normalising |
 | `src/store.ts` | D1 reads and writes |
-| `migrations/` | Schema, demo farmers, WhatsApp delivery status, session versions |
+| `migrations/` | Schema, demo farmers, WhatsApp delivery status, session versions, question screens |
 | `docs/whatsapp-setup.md` | Setting up Meta's WhatsApp test number |
 
 `src/checks.ts` imports the decision tree from `../api/src/assess.ts`, so the

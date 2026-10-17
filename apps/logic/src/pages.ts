@@ -148,6 +148,7 @@ function page(title: string, css: string, body: string, script: string): string 
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title}</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%231D5233'/%3E%3Cpath fill='%23fff' d='M19 5c-7 0-12 3.5-13 9.6-.2 1.2-.2 2.5 0 3.8l1.4-.3c-.1-.9-.1-1.9 0-2.8C9.5 13.4 12 10.8 15.5 9c-3 2.1-5.2 4.6-6.4 7.7C14.8 17.1 19 12.6 19 5Z'/%3E%3C/svg%3E">
 <style>${STYLE}${css}</style>
 </head>
 <body>
@@ -157,94 +158,249 @@ ${body}
 </html>`;
 }
 
+// A phone drawn like a WhatsApp chat, for presenting. Same flow as WhatsApp:
+// questions arrive with reply buttons inside the bubble, a tap sends the
+// button's label and its screen, ticks go sent -> delivered -> read, and a
+// banner slides down when FieldWise messages first.
 export const simulatorPage = page(
   "FieldWise Phone",
   `
+:root {
+  --wa-head: #008069; --wa-on-head: #FFFFFF; --wa-wall: #EFEAE2; --wa-in: #FFFFFF; --wa-out: #D9FDD3;
+  --wa-text: #111B21; --wa-meta: #667781; --wa-button: #027EB5; --wa-tick: #53BDEB; --wa-chip: #FFFFFF;
+  --wa-notice: #FFEECD; --wa-on-notice: #54656F; --wa-input: #FFFFFF; --wa-bar: #F0F2F5; --wa-send: #00A884;
+  --wa-doodle: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140' viewBox='0 0 140 140'%3E%3Cg fill='none' stroke='%23000' stroke-opacity='.045' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M18 34c8-14 26-14 30 0-6 13-23 13-30 0zM33 34h-12'/%3E%3Cpath d='M98 18v22M98 26c-7-6-13-4-15 1M98 31c7-6 13-4 15 1'/%3E%3Ccircle cx='112' cy='92' r='9'/%3E%3Cpath d='M112 76v-5M112 113v-5M128 92h-5M101 92h-5'/%3E%3Cpath d='M20 98q9-12 18 0t18 0'/%3E%3Cpath d='M64 124c6-10 18-10 22 0-4 9-17 9-22 0z'/%3E%3Cpath d='M62 62l6 10 6-10z'/%3E%3C/g%3E%3C/svg%3E");
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --wa-head: #202C33; --wa-on-head: #E9EDEF; --wa-wall: #0B141A; --wa-in: #202C33; --wa-out: #005C4B;
+    --wa-text: #E9EDEF; --wa-meta: #8696A0; --wa-button: #53BDEB; --wa-chip: #182229;
+    --wa-notice: #182229; --wa-on-notice: #FFD279; --wa-input: #2A3942; --wa-bar: #1F2C34; --wa-send: #00A884;
+    --wa-doodle: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140' viewBox='0 0 140 140'%3E%3Cg fill='none' stroke='%23fff' stroke-opacity='.05' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M18 34c8-14 26-14 30 0-6 13-23 13-30 0zM33 34h-12'/%3E%3Cpath d='M98 18v22M98 26c-7-6-13-4-15 1M98 31c7-6 13-4 15 1'/%3E%3Ccircle cx='112' cy='92' r='9'/%3E%3Cpath d='M112 76v-5M112 113v-5M128 92h-5M101 92h-5'/%3E%3Cpath d='M20 98q9-12 18 0t18 0'/%3E%3Cpath d='M64 124c6-10 18-10 22 0-4 9-17 9-22 0z'/%3E%3Cpath d='M62 62l6 10 6-10z'/%3E%3C/g%3E%3C/svg%3E");
+  }
+}
 body { min-height: 100vh; display: grid; place-items: start center; padding: 16px; }
-.wrap { width: min(380px, 100%); display: grid; gap: 12px; }
+.wrap { width: min(390px, 100%); display: grid; gap: 12px; }
 .pick { display: flex; gap: 8px; align-items: center; }
-.pick select { flex: 1; }
-.phone { background: var(--ink); border-radius: 40px; padding: 12px; box-shadow: 0 20px 50px rgba(0,0,0,.18); }
-.screen { background: var(--surface-2); border-radius: 30px; overflow: hidden; display: flex; flex-direction: column; height: min(680px, calc(100vh - 120px)); min-height: 460px; }
-.status { display: flex; justify-content: space-between; padding: 10px 22px 4px; font-size: 12px; font-weight: 600; }
-.chat-head { display: flex; align-items: center; gap: 10px; padding: 8px 16px 10px; border-bottom: 1px solid var(--hairline); background: var(--surface); }
-.avatar { width: 36px; height: 36px; border-radius: 50%; background: var(--primary); color: var(--on-primary); display: grid; place-items: center; font-weight: 700; }
-.chat-head b { display: block; font-size: 15px; }
-.chat-head span { font-size: 12px; color: var(--muted); }
-.thread { flex: 1; overflow-y: auto; padding: 14px 12px; display: flex; flex-direction: column; gap: 6px; }
-.bubble { max-width: 85%; padding: 8px 12px 6px; border-radius: 16px; font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; box-shadow: 0 1px 1px rgba(0,0,0,.06); }
-.bubble.out { align-self: flex-start; background: var(--bubble-out); border-top-left-radius: 4px; }
-.bubble.in { align-self: flex-end; background: var(--bubble-in); border-top-right-radius: 4px; }
-.bubble small { display: block; font-size: 11px; color: var(--muted); text-align: right; margin-top: 2px; }
-.bubble.failed { outline: 1.5px solid var(--red); }
-.bubble small.err { color: var(--red); text-align: left; }
-.bubble .cap { display: block; font-size: 12px; font-weight: 600; color: var(--primary); margin-bottom: 2px; }
-.empty { margin: auto; text-align: center; color: var(--muted); font-size: 14px; padding: 24px; }
-.quick { display: flex; gap: 8px; padding: 8px 12px 0; flex-wrap: wrap; }
-.quick button { flex: 1; border: 1px solid var(--hairline); background: var(--surface); color: var(--primary); border-radius: 999px; padding: 9px 12px; font-weight: 600; }
-.compose { display: flex; gap: 8px; padding: 10px 12px 14px; }
-.compose input { flex: 1; border-radius: 999px; }
-.compose button { width: 42px; height: 42px; border-radius: 50%; border: 0; background: var(--primary); color: var(--on-primary); font-weight: 700; }
-.note { font-size: 12px; color: var(--muted); text-align: center; }
+.pick select { flex: 1; font-size: 14px; }
+.phone { position: relative; background: #0E0F0C; border-radius: 52px; padding: 12px; box-shadow: 0 0 0 2px #2A2B27 inset, 0 30px 60px rgba(0,0,0,.25); }
+.phone.buzz { animation: buzz .5s ease-in-out; }
+@keyframes buzz { 0%,100% { transform: none; } 20% { transform: translateX(-3px) rotate(-.6deg); } 40% { transform: translateX(3px) rotate(.6deg); } 60% { transform: translateX(-2px); } 80% { transform: translateX(2px); } }
+.island { position: absolute; top: 22px; left: 50%; transform: translateX(-50%); width: 104px; height: 30px; background: #000; border-radius: 20px; z-index: 5; }
+.screen { position: relative; background: var(--wa-wall); border-radius: 42px; overflow: hidden; display: flex; flex-direction: column; height: min(760px, calc(100vh - 110px)); min-height: 520px; color: var(--wa-text); }
+.statusbar { display: flex; justify-content: space-between; align-items: center; padding: 16px 30px 6px; font-size: 14px; font-weight: 600; background: var(--wa-head); color: var(--wa-on-head); }
+.statusbar .sys { display: flex; gap: 5px; align-items: center; }
+.statusbar svg { display: block; fill: currentColor; }
+.wa-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px 10px 6px; background: var(--wa-head); color: var(--wa-on-head); }
+.wa-head .back { font-size: 26px; line-height: 1; padding: 0 2px 2px 4px; opacity: .95; }
+.avatar { width: 38px; height: 38px; border-radius: 50%; background: #E7F3EC; display: grid; place-items: center; flex: none; }
+.avatar svg { width: 22px; height: 22px; }
+.who { flex: 1; min-width: 0; }
+.who b { display: flex; align-items: center; gap: 4px; font-size: 16px; font-weight: 600; }
+.who b svg { width: 15px; height: 15px; flex: none; }
+.who span { display: block; font-size: 12.5px; opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wa-head .icons { display: flex; gap: 18px; padding-right: 6px; }
+.wa-head .icons svg { width: 20px; height: 20px; fill: currentColor; display: block; }
+.thread { flex: 1; overflow-y: auto; padding: 10px 14px 8px; display: flex; flex-direction: column; gap: 3px; background-color: var(--wa-wall); background-image: var(--wa-doodle); background-size: 140px 140px; scroll-behavior: smooth; }
+.chip { align-self: center; background: var(--wa-chip); color: var(--wa-meta); font-size: 12px; padding: 5px 12px; border-radius: 8px; margin: 6px 0; box-shadow: 0 1px .5px rgba(11,20,26,.13); text-transform: uppercase; letter-spacing: .02em; }
+.notice { align-self: center; max-width: 88%; background: var(--wa-notice); color: var(--wa-on-notice); font-size: 12px; line-height: 1.4; padding: 6px 10px; border-radius: 8px; text-align: center; margin-bottom: 8px; box-shadow: 0 1px .5px rgba(11,20,26,.13); }
+.msg { max-width: 82%; display: flex; flex-direction: column; margin-top: 4px; }
+.msg.from-fw { align-self: flex-start; }
+.msg.from-me { align-self: flex-end; }
+.msg.cont { margin-top: 1px; }
+.bubble { position: relative; padding: 6px 8px 8px 9px; border-radius: 8px; font-size: 14.2px; line-height: 1.38; white-space: pre-wrap; overflow-wrap: anywhere; box-shadow: 0 1px .5px rgba(11,20,26,.13); }
+.from-fw .bubble { background: var(--wa-in); border-top-left-radius: 0; }
+.from-me .bubble { background: var(--wa-out); border-top-right-radius: 0; }
+.from-fw:not(.cont) .bubble::before, .from-me:not(.cont) .bubble::before { content: ""; position: absolute; top: 0; width: 8px; height: 13px; }
+.from-fw:not(.cont) .bubble::before { left: -8px; background: var(--wa-in); clip-path: polygon(100% 0, 0 0, 100% 100%); }
+.from-me:not(.cont) .bubble::before { right: -8px; background: var(--wa-out); clip-path: polygon(0 0, 100% 0, 0 100%); }
+.from-fw.cont .bubble { border-top-left-radius: 8px; }
+.from-me.cont .bubble { border-top-right-radius: 8px; }
+.has-buttons .bubble { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.bubble b.head { display: block; font-weight: 700; margin-bottom: 2px; }
+.meta { float: right; margin: 6px 0 -4px 10px; font-size: 11px; color: var(--wa-meta); display: inline-flex; gap: 3px; align-items: center; position: relative; top: 2px; }
+.meta svg { width: 16px; height: 11px; }
+.tick { fill: var(--wa-meta); }
+.tick.read { fill: var(--wa-tick); }
+.tick .two { opacity: 1; }
+.tick.sent .two { opacity: 0; }
+.fresh .tick { animation: tick-read 1.6s steps(1) forwards; }
+.fresh .tick .two { animation: tick-two 1.6s steps(1) forwards; }
+@keyframes tick-two { 0% { opacity: 0; } 35% { opacity: 1; } 100% { opacity: 1; } }
+@keyframes tick-read { 0% { fill: var(--wa-meta); } 75% { fill: var(--wa-tick); } 100% { fill: var(--wa-tick); } }
+.buttons { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; }
+.buttons button { background: var(--wa-in); color: var(--wa-button); border: 0; padding: 10px; font-size: 14.5px; font-weight: 500; display: flex; align-items: center; justify-content: center; gap: 6px; box-shadow: 0 1px .5px rgba(11,20,26,.13); }
+.buttons button:last-child { border-radius: 0 0 8px 8px; }
+.buttons button svg { width: 15px; height: 15px; fill: currentColor; }
+.buttons button:active { filter: brightness(.95); }
+.failed .bubble { outline: 1.5px solid var(--red); }
+.err { font-size: 11.5px; color: var(--red); margin-top: 3px; }
+.typing .bubble { display: flex; gap: 4px; padding: 12px 14px; }
+.typing i { width: 7px; height: 7px; border-radius: 50%; background: var(--wa-meta); animation: dot 1.2s infinite; }
+.typing i:nth-child(2) { animation-delay: .15s; }
+.typing i:nth-child(3) { animation-delay: .3s; }
+@keyframes dot { 0%, 60%, 100% { opacity: .35; transform: none; } 30% { opacity: 1; transform: translateY(-3px); } }
+.empty { margin: auto; text-align: center; color: var(--wa-meta); font-size: 13.5px; padding: 24px; background: var(--wa-chip); border-radius: 10px; }
+.wa-input { display: flex; gap: 6px; align-items: flex-end; padding: 6px 8px 22px; background: transparent; }
+.field { flex: 1; display: flex; align-items: center; gap: 8px; background: var(--wa-input); border-radius: 24px; padding: 4px 12px; box-shadow: 0 1px .5px rgba(11,20,26,.13); }
+.field svg { width: 22px; height: 22px; fill: var(--wa-meta); flex: none; }
+.field input { flex: 1; border: 0; background: transparent; padding: 8px 0; font-size: 15px; color: var(--wa-text); outline: none; border-radius: 0; }
+.send { width: 46px; height: 46px; border-radius: 50%; border: 0; background: var(--wa-send); display: grid; place-items: center; flex: none; }
+.send svg { width: 22px; height: 22px; fill: #fff; }
+.banner { position: absolute; top: 56px; left: 10px; right: 10px; z-index: 6; background: rgba(250,250,250,.94); color: #111; backdrop-filter: blur(16px); border-radius: 18px; padding: 10px 14px 12px; box-shadow: 0 10px 30px rgba(0,0,0,.25); transform: translateY(calc(-100% - 80px)); opacity: 0; transition: transform .45s cubic-bezier(.2,.9,.25,1.1), opacity .2s; }
+.banner.show { transform: none; opacity: 1; }
+.banner .app { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #555; margin-bottom: 3px; }
+.banner .app i { width: 18px; height: 18px; border-radius: 5px; background: #25D366; display: inline-block; }
+.banner .app span { margin-left: auto; }
+.banner b { display: block; font-size: 14px; }
+.banner p { margin: 1px 0 0; font-size: 13.5px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.note { font-size: 12px; color: var(--muted); text-align: center; margin: 0; }
 `,
   `<main class="wrap">
   <div class="pick"><label for="farmer" class="muted" style="font-size:13px">Farmer</label><select id="farmer"></select></div>
-  <div class="phone"><div class="screen">
-    <div class="status"><span id="clock">9:41</span><span>FieldWise</span></div>
-    <div class="chat-head"><div class="avatar">F</div><div><b>FieldWise</b><span id="sub">Simulator</span></div></div>
+  <div class="phone" id="phone"><div class="island"></div><div class="screen">
+    <div class="statusbar"><span id="clock">9:41</span><span class="sys" aria-hidden="true">
+      <svg width="17" height="11" viewBox="0 0 17 11"><rect x="0" y="7" width="3" height="4" rx="1"/><rect x="4.5" y="5" width="3" height="6" rx="1"/><rect x="9" y="2.5" width="3" height="8.5" rx="1"/><rect x="13.5" y="0" width="3" height="11" rx="1"/></svg>
+      <svg width="15" height="11" viewBox="0 0 15 11"><path d="M7.5 2.2c2.2 0 4.2.9 5.7 2.3l1.1-1.1A9.6 9.6 0 0 0 7.5.6 9.6 9.6 0 0 0 .7 3.4l1.1 1.1a8 8 0 0 1 5.7-2.3Zm0 3.2c1.3 0 2.5.5 3.4 1.3l1.1-1.1a6.4 6.4 0 0 0-9 0l1.1 1.1c.9-.8 2.1-1.3 3.4-1.3Zm0 3.1c.5 0 .9.2 1.2.5L7.5 10.2 6.3 9c.3-.3.7-.5 1.2-.5Z"/></svg>
+      <svg width="26" height="12" viewBox="0 0 26 12"><rect x=".5" y=".5" width="22" height="11" rx="3" fill="none" stroke="currentColor" opacity=".45"/><rect x="2" y="2" width="16" height="8" rx="1.8"/><rect x="23.5" y="4" width="1.8" height="4" rx=".9" opacity=".45"/></svg>
+    </span></div>
+    <div class="banner" id="banner" aria-hidden="true"><div class="app"><i></i>WhatsApp<span>now</span></div><b>FieldWise</b><p id="banner-text"></p></div>
+    <header class="wa-head">
+      <span class="back" aria-hidden="true">‹</span>
+      <div class="avatar" aria-hidden="true"><svg viewBox="0 0 24 24"><path fill="#1D5233" d="M20 4c-8 0-14 4-15 11-.2 1.4-.2 2.9 0 4.4l1.6-.3c-.1-1.1-.1-2.2 0-3.2C9 14 12 11 16 9c-3.4 2.4-6 5.3-7.4 8.8 6.6.5 11.4-4.7 11.4-13.8Z"/></svg></div>
+      <div class="who"><b>FieldWise <svg viewBox="0 0 18 18" aria-label="Business account"><path fill="#25D366" d="M9 0l2.2 1.6 2.7-.2.9 2.6 2.4 1.3-.6 2.7L18 9l-1.4 2 .6 2.7-2.4 1.3-.9 2.6-2.7-.2L9 18l-2.2-1.6-2.7.2-.9-2.6-2.4-1.3.6-2.7L0 9l1.4-2-.6-2.7L3.2 3l.9-2.6 2.7.2Z"/><path fill="#fff" d="M7.7 12.3 4.6 9.2l1.2-1.2 1.9 1.9 4.5-4.5 1.2 1.2Z"/></svg></b><span id="sub">Business account</span></div>
+      <span class="icons" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M15 8v8H5V8h10m1-2H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 4v-11l-4 4V7a1 1 0 0 0-1-1Z"/></svg>
+        <svg viewBox="0 0 24 24"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1A17 17 0 0 1 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1l-2.3 2.2Z"/></svg>
+      </span>
+    </header>
     <div class="thread" id="thread" aria-live="polite"></div>
-    <div class="quick" id="quick"></div>
-    <form class="compose" id="compose"><input type="text" id="text" placeholder="Type 1, 2, yes, inde…" autocomplete="off" aria-label="Reply"><button type="submit" aria-label="Send">➤</button></form>
+    <form class="wa-input" id="compose">
+      <label class="field"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 18.2a8.2 8.2 0 1 1 0-16.4 8.2 8.2 0 0 1 0 16.4ZM8.5 11a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Zm7 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3ZM12 17.5c2.3 0 4.3-1.4 5.1-3.5H6.9c.8 2.1 2.8 3.5 5.1 3.5Z"/></svg><input type="text" id="text" placeholder="Message" autocomplete="off" aria-label="Reply"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6v11.5a4 4 0 0 1-8 0V5a2.5 2.5 0 0 1 5 0v10.5a1 1 0 0 1-2 0V6H10v9.5a2.5 2.5 0 0 0 5 0V5a4 4 0 0 0-8 0v12.5a5.5 5.5 0 0 0 11 0V6h-1.5Z"/></svg></label>
+      <button class="send" type="submit" aria-label="Send"><svg viewBox="0 0 24 24"><path d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12.6 2-12.6 2Z"/></svg></button>
+    </form>
   </div></div>
-  <p class="note" id="note">Simulated phone. Messages here never leave FieldWise.</p>
+  <p class="note" id="note">Simulated WhatsApp chat. Messages here never leave FieldWise.</p>
 </main>`,
   `
-var farmers = [], current = null, lastCount = -1, sending = false;
-var TICKS = { sent: "✓", delivered: "✓✓", read: "✓✓ read" };
+var farmers = [], current = null, lastKey = null, lastMaxId = 0, sending = false, firstDraw = true;
+var seenIds = {};
 var select = document.getElementById("farmer");
 var thread = document.getElementById("thread");
-var quick = document.getElementById("quick");
+var HEADER = /^.+ · \\d+ (of|mwa) 8$/;
+var OPTION = /^(\\d) (.+)$/;
+var NS = "http://www.w3.org/2000/svg";
 
-function render(messages) {
-  // Redraw when a message arrives or a delivery tick changes.
-  var key = messages.length + ":" + messages.map(function (m) { return m.status || ""; }).join(",");
-  if (key === lastCount) return;
-  lastCount = key;
-  thread.textContent = "";
-  if (!messages.length) {
-    append(thread, el("div", { class: "empty" }, "No messages yet.", el("br"), "Raise a flag from the dashboard, or send a message."));
-  }
-  messages.forEach(function (m) {
-    var lines = m.body.split("\\n");
-    var cap = /·\\s\\d+\\s(of|mwa)\\s8$/.test(lines[0]) ? lines.shift() : null;
-    var time = new Date(m.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    var tick = TICKS[m.status] || "";
-    append(thread, el("div", { class: "bubble " + m.direction + (m.status === "failed" ? " failed" : "") },
-      cap && el("span", { class: "cap" }, cap), lines.join("\\n"),
-      el("small", {}, time + (tick ? " " + tick : "")),
-      m.status === "failed" && el("small", { class: "err" }, "Not delivered: " + (m.error || "unknown error"))));
+function svgIcon(viewBox, paths, cls) {
+  var svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", viewBox);
+  if (cls) svg.setAttribute("class", cls);
+  paths.forEach(function (p) {
+    var path = document.createElementNS(NS, "path");
+    path.setAttribute("d", p[0]);
+    if (p[1]) path.setAttribute("class", p[1]);
+    svg.appendChild(path);
   });
-  thread.scrollTop = thread.scrollHeight;
-  quick.textContent = "";
-  var last = messages[messages.length - 1];
-  if (last && last.direction === "out") {
-    last.body.split("\\n").forEach(function (line) {
-      var m = line.match(/^(\\d)\\s(.+)$/);
-      if (m) append(quick, el("button", { type: "button", on: { click: function () { send(m[1]); } } }, m[2]));
-    });
+  return svg;
+}
+function ticks(status) {
+  // One tick, then two, then blue: the farmer's own messages, as WhatsApp shows them.
+  return svgIcon("0 0 16 11", [["M11.1.6 4.4 7.3 1.6 4.5.5 5.6l3.9 3.9L12.2 1.7Z"], ["M15.2.6 8.5 7.3l-.7-.7-1.1 1.1 1.8 1.8L16.3 1.7Z", "two"]], "tick " + status);
+}
+function replyIcon() { return svgIcon("0 0 24 24", [["M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11Z"]]); }
+function time(iso) { return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+
+/** Splits a logged question into its header, text and buttons. */
+function parse(m) {
+  var lines = m.body.split("\\n");
+  var head = HEADER.test(lines[0]) ? lines.shift() : null;
+  var options = [];
+  if (m.screen) {
+    while (lines.length && OPTION.test(lines[lines.length - 1])) options.unshift(lines.pop().match(OPTION)[2]);
   }
+  return { head: head, text: lines.join("\\n"), options: options };
+}
+
+function bubbleFor(m, prev) {
+  var mine = m.direction === "in";
+  var cont = prev && prev.direction === m.direction;
+  var p = mine ? { head: null, text: m.body, options: [] } : parse(m);
+  var fresh = mine && !firstDraw && !seenIds[m.id];
+  var status = m.status === "failed" ? "" : "read";
+  var meta = el("span", { class: "meta" }, time(m.at), mine && ticks(fresh ? "sent" : status));
+  var wrap = el("div", { class: "msg " + (mine ? "from-me" : "from-fw") + (cont ? " cont" : "") + (p.options.length ? " has-buttons" : "") + (fresh ? " fresh" : "") + (m.status === "failed" ? " failed" : "") },
+    el("div", { class: "bubble" }, p.head && el("b", { class: "head" }, p.head), p.text, meta));
+  if (p.options.length) {
+    append(wrap, el("div", { class: "buttons" }, p.options.map(function (label) {
+      return el("button", { type: "button", on: { click: function () { send(label, m.screen); } } }, replyIcon(), label);
+    })));
+  }
+  if (m.status === "failed") append(wrap, el("div", { class: "err" }, "Not delivered: " + (m.error || "unknown error")));
+  return wrap;
+}
+
+function render(messages, pending) {
+  thread.textContent = "";
+  append(thread, el("div", { class: "chip" }, "Today"));
+  append(thread, el("div", { class: "notice" }, "FieldWise sends farm advice for Kasungu. Messages here are simulated and never leave FieldWise."));
+  if (!messages.length && !pending) append(thread, el("div", { class: "empty" }, "No messages yet. Fire a wet spell from the dashboard."));
+  var prev = null;
+  messages.forEach(function (m) { append(thread, bubbleFor(m, prev)); prev = m; });
+  if (pending) {
+    append(thread, bubbleFor({ id: "pending", direction: "in", body: pending, at: new Date().toISOString() }, prev));
+    append(thread, el("div", { class: "msg from-fw typing" }, el("div", { class: "bubble" }, el("i"), el("i"), el("i"))));
+  }
+  messages.forEach(function (m) { seenIds[m.id] = true; });
+  thread.scrollTop = thread.scrollHeight;
+  firstDraw = false;
+}
+
+var bannerTimer;
+function banner(text) {
+  document.getElementById("banner-text").textContent = text.replace(/^FieldWise:\\s*/, "");
+  var b = document.getElementById("banner");
+  b.classList.add("show");
+  var phone = document.getElementById("phone");
+  phone.classList.remove("buzz");
+  void phone.offsetWidth;
+  phone.classList.add("buzz");
+  clearTimeout(bannerTimer);
+  bannerTimer = setTimeout(function () { b.classList.remove("show"); }, 4500);
 }
 
 function refresh() {
-  if (!current) return;
-  api("/farmers/" + encodeURIComponent(current.id) + "/messages").then(function (d) { render(d.messages); }).catch(function () {});
+  if (!current || sending) return;
+  var id = current.id;
+  api("/farmers/" + encodeURIComponent(id) + "/messages").then(function (d) {
+    if (!current || current.id !== id || sending) return;
+    var msgs = d.messages;
+    var key = msgs.length + ":" + msgs.map(function (m) { return m.id + (m.status || ""); }).join(",");
+    if (key === lastKey) return;
+    // FieldWise writing first (an alert, a reminder): ring the phone.
+    var fresh = msgs.filter(function (m) { return m.id > lastMaxId; });
+    if (lastKey !== null && fresh.length && fresh[0].direction === "out") banner(fresh[0].body.split("\\n")[0]);
+    lastKey = key;
+    lastMaxId = msgs.length ? msgs[msgs.length - 1].id : 0;
+    render(msgs);
+  }).catch(function () {});
 }
 
-function send(text) {
-  if (!current || sending || !text.trim()) return;
+function send(text, screen) {
+  if (!current || sending || !String(text).trim()) return;
   sending = true;
-  api("/inbound", { phone: current.phone, text: text }).then(refresh).catch(function (e) { toast(e.message); })
-    .then(function () { sending = false; });
+  document.getElementById("sub").textContent = "typing…";
+  // Show the farmer's message and FieldWise typing at once, then the real reply.
+  api("/farmers/" + encodeURIComponent(current.id) + "/messages").then(function (d) { render(d.messages, text); }).catch(function () {});
+  var started = Date.now();
+  var body = { phone: current.phone, text: text };
+  if (screen) body.screen = screen;
+  api("/inbound", body).catch(function (e) { toast(e.message); }).then(function () {
+    setTimeout(function () {
+      sending = false;
+      document.getElementById("sub").textContent = "Business account";
+      refresh();
+    }, Math.max(0, 900 - (Date.now() - started)));
+  });
 }
 
 function choose(id) {
@@ -252,11 +408,10 @@ function choose(id) {
   if (!current) return;
   store("fieldwise-sim-farmer", current.id);
   select.value = current.id;
-  document.getElementById("sub").textContent = current.name + " · " + current.crop + (current.channel === "whatsapp" ? " · WhatsApp" : "");
+  lastKey = null; lastMaxId = 0; firstDraw = true; seenIds = {};
   document.getElementById("note").textContent = current.channel === "whatsapp"
     ? "Mirror of this farmer's real WhatsApp chat. Replies typed here go to FieldWise as theirs."
-    : "Simulated phone. Messages here never leave FieldWise.";
-  lastCount = -1;
+    : "Simulated WhatsApp chat for " + current.name + ". Messages here never leave FieldWise.";
   refresh();
 }
 
@@ -267,9 +422,9 @@ document.getElementById("compose").addEventListener("submit", function (e) {
   input.value = "";
 });
 select.addEventListener("change", function () { choose(select.value); });
-setInterval(function () {
-  document.getElementById("clock").textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}, 10000);
+function tickClock() { document.getElementById("clock").textContent = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).replace(/\\s?[AP]M$/i, ""); }
+tickClock();
+setInterval(tickClock, 10000);
 
 gate(function () {
   api("/farmers").then(function (d) {
@@ -277,9 +432,8 @@ gate(function () {
     farmers.forEach(function (f) {
       append(select, el("option", { value: f.id }, f.name + " · " + f.crop + (f.farm_name ? " · " + f.farm_name : "")));
     });
-    var wanted = new URLSearchParams(location.search).get("farmer") || store("fieldwise-sim-farmer");
-    choose(wanted);
-    setInterval(refresh, 2000);
+    choose(new URLSearchParams(location.search).get("farmer") || store("fieldwise-sim-farmer"));
+    setInterval(refresh, 1500);
   }).catch(function (e) { toast(e.message); });
 });
 `,

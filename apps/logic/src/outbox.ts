@@ -44,7 +44,9 @@ export class Outbox {
           failures.push(err);
         }
       }
-      log.push({ farmer_id: farmer.id, direction: "out", channel: farmer.channel, body, at, status, error, provider_id: providerId });
+      // A question with reply buttons keeps its screen, so the simulator can send it back with a tap.
+      const screen = typeof message === "string" || !message.options.length ? null : message.key;
+      log.push({ farmer_id: farmer.id, direction: "out", channel: farmer.channel, body, at, status, error, provider_id: providerId, screen });
     }
     await this.store.logMessages(log);
     for (const failure of failures) await this.onFailure?.(farmer, failure);

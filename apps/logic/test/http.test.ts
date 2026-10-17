@@ -108,10 +108,13 @@ describe("felix and demo routes", () => {
   it("resets the demo only when asked to explicitly", async () => {
     const call = client();
     await call("POST", "/demo/scenario", { weather: "wet", farmer_id: "F014" });
+    await call("POST", "/inbound", { phone: "+2650000000014", text: "1" }); // picks English
     expect((await call("POST", "/demo/reset", {})).status).toBe(400);
     expect((await call("POST", "/demo/reset", { confirm: "reset" })).body).toEqual({ reset: true });
     expect((await call("GET", "/flags")).body.flags).toEqual([]);
-    expect((await call("GET", "/farmers")).body.farmers).toHaveLength(8);
+    const farmers = (await call("GET", "/farmers")).body.farmers;
+    expect(farmers).toHaveLength(8);
+    expect(farmers.every((f: { lang: string | null }) => f.lang === null)).toBe(true);
     // Alerts re-arm after a reset.
     const again = await call("POST", "/demo/scenario", { weather: "wet", farmer_id: "F014" });
     expect(again.body.results[0].alert).toBe("new");
