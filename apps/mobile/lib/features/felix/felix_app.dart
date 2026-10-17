@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:math' as math;
 
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
@@ -20,10 +19,12 @@ import '../home/widgets/home_sections.dart';
 import '../home/widgets/zone_carousel.dart';
 import '../shell/almanac_scaffold.dart';
 import '../shell/bottom_nav_island.dart';
+import 'maize_check.dart';
 
-/// The officer experience uses Farmable's shell and cards. Farm locations and
-/// reports are local scenario data; weather and mapped soil are refreshed when
-/// their public services are available.
+const _farmCarouselViewportFraction = 0.58;
+
+/// The officer experience uses Farmable's shell and cards. Each farm's 7-day
+/// forecast sets its leaf-disease risk; high-risk farms get a USSD check-in.
 class FelixApp extends StatelessWidget {
   const FelixApp({super.key});
 
@@ -39,26 +40,16 @@ class FelixApp extends StatelessWidget {
 }
 
 class _Farm {
-  _Farm(
-    this.id,
-    this.name,
-    this.point,
-    this.crop,
-    this.clay,
-    this.rain,
-    this.heat,
-  );
+  _Farm(this.id, this.name, this.point, this.crop, this.week);
 
   final String id;
   final String name;
   final LatLng point;
   final String crop;
-  double clay; // SoilGrids 0–5 cm estimate, percent.
-  double rain; // Forecast precipitation over the next three days, mm.
-  double heat; // Highest forecast temperature over the next three days, °C.
-  bool soilLive = false;
-  bool weatherLive = false;
-  String? report;
+  final List<DayWeather> week; // Open-Meteo forecast, next 7 days.
+  bool checkInSent = false;
+  CheckOutcome? outcome;
+  String? finding;
   String? answers;
   DateTime? reportedAt;
   String? override;
@@ -66,150 +57,108 @@ class _Farm {
   bool completed = false;
   bool planned = false;
 
-  bool get wetFlag => soilLive && clay >= 35 && rain >= 25;
-  bool get dryFlag => rain < 3 && heat >= 30;
-  bool get concerningReport => report == 'Concern reported';
+  // The forecast week never changes, so its risk is worked out once.
+  late final int riskScore = leafDiseaseScore(week);
+  late final RiskLevel risk = riskLevelFor(riskScore);
+  late final String forecast =
+      '${_days((d) => d.rainMm > 0)} rain days · '
+      '${_days((d) => d.humidHours >= 6)} humid nights · '
+      '${_days((d) => d.meanTempC >= 18 && d.meanTempC <= 27)} mild days';
+  bool get awaitingAnswers => risk == RiskLevel.high && outcome == null;
+  String get flag => crop == 'Maize' ? 'maize leaf blight' : 'leaf disease';
+  int _days(bool Function(DayWeather day) test) => week.where(test).length;
+
   int get score {
     if (completed || override == 'Already checked') return 0;
-    var value = wetFlag
-        ? 75
-        : dryFlag
-        ? 62
-        : 25;
-    if (concerningReport) value += 55;
-    if (report == 'Conditions normal') value -= 15;
+    var value =
+        outcome?.score ??
+        switch (risk) {
+          RiskLevel.high => 60,
+          RiskLevel.medium => 40,
+          RiskLevel.low => 20,
+        };
     if (override == 'More urgent') value += 30;
     if (override == 'Call instead') value -= 20;
     return value;
   }
 
-  String get status => completed
-      ? 'Completed'
-      : override == 'Call instead'
-      ? 'Call today'
-      : score >= 75
-      ? 'Visit today'
-      : score >= 55
-      ? 'Watch'
-      : 'Routine';
+  String get status {
+    if (completed) return 'Completed';
+    if (override == 'Call instead') return 'Call today';
+    return outcome?.status ??
+        switch (risk) {
+          RiskLevel.high => checkInSent ? 'Check-in sent' : 'Call farmer',
+          RiskLevel.medium => 'Watch',
+          RiskLevel.low => 'Routine',
+        };
+  }
+
   String get action {
     if (override == 'Call instead') return 'Call farmer';
     if (override == 'Different action' && note != null) return note!;
-    if (wetFlag) return 'Check drainage';
-    if (dryFlag) return 'Check water stress';
-    if (concerningReport) return 'Follow up report';
-    return 'Routine follow-up';
+    return switch (outcome) {
+      CheckOutcome.confirmedUrgent => 'Go now: $finding',
+      CheckOutcome.wrongFlag => 'Go now: check for $finding',
+      CheckOutcome.confirmed => 'Visit this week: $finding',
+      CheckOutcome.otherCrop => 'Call farmer about their $finding',
+      CheckOutcome.earlySigns => 'Re-check at the next forecast',
+      CheckOutcome.clear => 'No action needed',
+      null => switch (risk) {
+        RiskLevel.high =>
+          checkInSent ? 'Awaiting farmer answers' : 'Call farmer',
+        RiskLevel.medium => 'Watch the forecast',
+        RiskLevel.low => 'Routine follow-up',
+      },
+    };
   }
 
   String get why {
-    if (report == 'Conditions normal' && wetFlag) {
-      return 'The farmer reported no standing water. Forecast rain and mapped soil still warrant a follow-up after the rain.';
-    }
-    if (report == 'Conditions normal' && dryFlag) {
-      return 'The farmer reported no current wilting. Keep watching during the forecast hot, dry period.';
-    }
-    if (concerningReport && wetFlag) {
-      return 'The farmer reported standing water. Mapped clay-rich soil and forecast rain make a drainage check timely.';
-    }
-    if (concerningReport && dryFlag) {
-      return 'The farmer reported crop stress while hot, dry weather is forecast.';
-    }
-    if (concerningReport) {
-      return 'The farmer reported a condition that needs Felix to confirm it.';
-    }
-    if (wetFlag) {
-      return 'Mapped clay-rich soil and forecast rain suggest a possible drainage concern.';
-    }
-    if (dryFlag) {
-      return 'Hot weather with little forecast rain suggests checking for water stress.';
-    }
-    return 'No urgent concern from the current map and forecast information.';
+    final forecastLine =
+        'Forecast: $forecast. Leaf disease risk $riskScore/21 (${risk.label}).';
+    return switch (outcome) {
+      null => forecastLine,
+      CheckOutcome.otherCrop => 'Farmer says they grow $finding. $forecastLine',
+      _ => 'Flagged: $flag · Answers say: $finding. $forecastLine',
+    };
   }
 
-  String get success {
-    if (wetFlag) {
-      return 'Record drainage and standing water before and after the forecast rain.';
-    }
-    if (dryFlag) {
-      return 'Record visible stress and available water, then check again after action.';
-    }
-    return 'Record the crop condition and date of the next follow-up.';
-  }
+  String get success => switch (outcome) {
+    CheckOutcome.confirmedUrgent || CheckOutcome.confirmed =>
+      'Confirm the marks on the leaves and agree treatment with the farmer.',
+    CheckOutcome.wrongFlag =>
+      'Check for stunted, striped plants and leafhoppers.',
+    _ => 'Record the crop condition and date of the next follow-up.',
+  };
 }
 
+/// A week with [rain] rain days, [humid] humid nights and [mild] mild days,
+/// each counted from the start of the week.
+List<DayWeather> _week(int rain, int humid, int mild) => [
+  for (var day = 0; day < 7; day++)
+    DayWeather(
+      rainMm: day < rain ? 6.5 : 0,
+      humidHours: day < humid ? 9 : 3,
+      meanTempC: day < mild ? 22.5 : 28.5,
+    ),
+];
+
 List<_Farm> _sampleFarms() => [
-  _Farm(
-    'F014',
-    'Chimwemwe Farm',
-    const LatLng(-13.0368, 33.4885),
-    'Maize',
-    0,
-    0.9,
-    30.75,
-  ),
-  _Farm(
-    'F027',
-    'Kasungu North',
-    const LatLng(-13.0323, 33.4918),
-    'Groundnuts',
-    0,
-    0.9,
-    30.75,
-  ),
-  _Farm(
-    'F043',
-    'Mphatso Fields',
-    const LatLng(-13.0407, 33.4932),
-    'Maize',
-    0,
-    0.9,
-    30.75,
-  ),
-  _Farm(
-    'F056',
-    'Banda Family Farm',
-    const LatLng(-13.0430, 33.4855),
-    'Tobacco',
-    0,
-    0.9,
-    30.75,
-  ),
-  _Farm(
-    'F062',
-    'Riverbend Growers',
-    const LatLng(-13.0334, 33.4858),
-    'Vegetables',
-    0,
-    0.9,
-    30.75,
-  ),
-  _Farm(
-    'F075',
-    'Central Harvest',
-    const LatLng(-13.0389, 33.4961),
-    'Maize',
-    0,
-    0.9,
-    30.75,
-  ),
-  _Farm(
-    'F084',
-    'Dedza Road Farm',
-    const LatLng(-13.0414, 33.4829),
-    'Vegetables',
-    0,
-    0.9,
-    30.75,
-  ),
-  _Farm(
-    'F091',
-    'Chulu Hills',
-    const LatLng(-13.0304, 33.4954),
-    'Groundnuts',
-    0,
-    0.9,
-    30.75,
-  ),
+  _Farm('F014', 'Chimwemwe Farm', const LatLng(-13.0368, 33.4885), 'Maize',
+      _week(6, 6, 6)),
+  _Farm('F027', 'Kasungu North', const LatLng(-13.0323, 33.4918),
+      'Groundnuts', _week(4, 5, 5)),
+  _Farm('F043', 'Mphatso Fields', const LatLng(-13.0407, 33.4932), 'Maize',
+      _week(5, 5, 5)),
+  _Farm('F056', 'Banda Family Farm', const LatLng(-13.0430, 33.4855),
+      'Tobacco', _week(2, 2, 2)),
+  _Farm('F062', 'Riverbend Growers', const LatLng(-13.0334, 33.4858),
+      'Vegetables', _week(2, 3, 3)),
+  _Farm('F075', 'Central Harvest', const LatLng(-13.0389, 33.4961), 'Maize',
+      _week(3, 4, 4)),
+  _Farm('F084', 'Dedza Road Farm', const LatLng(-13.0414, 33.4829),
+      'Vegetables', _week(1, 1, 2)),
+  _Farm('F091', 'Chulu Hills', const LatLng(-13.0304, 33.4954), 'Groundnuts',
+      _week(3, 3, 3)),
 ];
 
 class _Workspace extends StatefulWidget {
@@ -221,39 +170,58 @@ class _Workspace extends StatefulWidget {
 
 class _WorkspaceState extends State<_Workspace> {
   final _farms = _sampleFarms();
-  final _dio = Dio(
-    BaseOptions(
-      connectTimeout: const Duration(seconds: 5),
-      receiveTimeout: const Duration(seconds: 5),
-    ),
+  bool _consent = true;
+  final _carousel = PageController(
+    viewportFraction: _farmCarouselViewportFraction,
   );
-  final _carousel = PageController(viewportFraction: .72);
   int _tab = 0;
   int _farmIndex = 0;
   String _filter = 'All';
   String _search = '';
   String? _selectedMapFarmId;
   final _events = <String>[];
-  final _alerts = <String>[
-    'Kasungu forecast: review farms exposed to heat and low rainfall.',
-  ];
+  final _alerts = <String>[];
   final _offlineRoads = <Polyline>[];
   final _offlineRivers = <Polyline>[];
-  String _forecastSource = 'FieldWise Kasungu forecast · 16 Oct';
 
   @override
   void initState() {
     super.initState();
     _loadKasunguAssets();
-    _refreshData();
+    _sendCheckIns();
   }
 
   @override
   void dispose() {
     _carousel.dispose();
-    _dio.close();
     super.dispose();
   }
+
+  /// A high-risk farm without answers gets a USSD check-in, as long as farmers
+  /// have agreed to be contacted.
+  void _sendCheckIns() {
+    if (!_consent) return;
+    for (final farm in _farms.where((f) => f.awaitingAnswers && !f.checkInSent)) {
+      farm.checkInSent = true;
+      _alerts.insert(
+        0,
+        '${farm.name}: high leaf disease risk. USSD check-in sent (*123#).',
+      );
+      _events.insert(0, '${farm.name}: USSD check-in sent');
+    }
+  }
+
+  void _setConsent(bool value) => setState(() {
+    _consent = value;
+    if (value) {
+      _sendCheckIns();
+      return;
+    }
+    for (final farm in _farms.where((f) => f.awaitingAnswers)) {
+      farm.checkInSent = false;
+    }
+    _alerts.insert(0, 'Automatic check-ins paused. Call flagged farms.');
+  });
 
   List<_Farm> get _ranked =>
       [..._farms]..sort((a, b) => b.score.compareTo(a.score));
@@ -288,98 +256,11 @@ class _WorkspaceState extends State<_Workspace> {
       );
       (isRiver ? rivers : roads).add(line);
     }
-    final weatherJson = jsonDecode(
-      await rootBundle.loadString('assets/demo/kasungu_weather.json'),
-    ) as Map<String, dynamic>;
-    final days = (weatherJson['daily'] as List<dynamic>)
-        .take(3)
-        .cast<Map<String, dynamic>>()
-        .toList();
-    final rain = days.fold<double>(
-      0,
-      (sum, day) => sum + (day['precipitation_sum'] as num).toDouble(),
-    );
-    final heat = days
-        .map((day) => (day['temperature_2m_max'] as num).toDouble())
-        .reduce(math.max);
-    final date = DateTime.parse(days.first['date'] as String);
     if (!mounted) return;
     setState(() {
       _offlineRoads.addAll(roads);
       _offlineRivers.addAll(rivers);
-      _forecastSource =
-          'FieldWise Kasungu forecast · ${date.day}/${date.month}';
-      for (final farm in _farms.where((farm) => !farm.weatherLive)) {
-        farm.rain = rain;
-        farm.heat = heat;
-      }
     });
-  }
-
-  Future<void> _refreshData() async {
-    // FieldWise's Kasungu snapshot is bundled for offline use. Fresh farm-level
-    // forecasts and soil estimates replace it when the public APIs respond.
-    for (final farm in _farms) {
-      try {
-        final response = await _dio.get<Map<String, dynamic>>(
-          'https://api.open-meteo.com/v1/forecast',
-          queryParameters: {
-            'latitude': farm.point.latitude,
-            'longitude': farm.point.longitude,
-            'daily': 'precipitation_sum,temperature_2m_max',
-            'forecast_days': 3,
-            'timezone': 'Africa/Blantyre',
-          },
-        );
-        final daily = response.data?['daily'] as Map<String, dynamic>?;
-        final rain = (daily?['precipitation_sum'] as List?)
-            ?.take(3)
-            .whereType<num>()
-            .fold<double>(0, (a, b) => a + b.toDouble());
-        final heat = (daily?['temperature_2m_max'] as List?)
-            ?.take(3)
-            .whereType<num>()
-            .fold<double>(-100, (a, b) => math.max(a, b.toDouble()));
-        if (rain != null && heat != null && mounted) {
-          setState(() {
-            final previousScore = farm.score;
-            farm.rain = rain;
-            farm.heat = heat;
-            farm.weatherLive = true;
-            if (previousScore < 55 && farm.score >= 55) {
-              _alerts.insert(0, '${farm.name} moved into your priority queue.');
-            }
-          });
-        }
-      } catch (_) {
-        // The local scenario remains usable without a connection.
-      }
-      try {
-        final response = await _dio.get<Map<String, dynamic>>(
-          'https://rest.isric.org/soilgrids/v2.0/properties/query',
-          queryParameters: {
-            'lon': farm.point.longitude,
-            'lat': farm.point.latitude,
-            'property': 'clay',
-            'depth': '0-5cm',
-            'value': 'mean',
-          },
-        );
-        final layers =
-            (response.data?['properties'] as Map?)?['layers'] as List?;
-        final depths = (layers?.first as Map?)?['depths'] as List?;
-        final values = (depths?.first as Map?)?['values'] as Map?;
-        final raw = values?['mean'];
-        if (raw is num && mounted) {
-          setState(() {
-            farm.clay = raw / 10; // SoilGrids clay is in g/kg.
-            farm.soilLive = true;
-          });
-        }
-      } catch (_) {
-        // Without a soil estimate, soil-dependent risk rules stay disabled.
-      }
-    }
   }
 
   void _message(String value) => ScaffoldMessenger.of(context)
@@ -440,11 +321,8 @@ class _WorkspaceState extends State<_Workspace> {
                 _detailLine('What to do', farm.action),
                 _detailLine('Why', farm.why),
                 _detailLine('How to check success', farm.success),
-                if (farm.report != null)
-                  _detailLine(
-                    'Farmer check-in',
-                    '${farm.report}: ${farm.answers}',
-                  ),
+                if (farm.answers != null)
+                  _detailLine('Farmer answers', farm.answers!),
                 if (farm.override != null)
                   _detailLine('Felix changed the plan', farm.override!),
                 const SizedBox(height: 12),
@@ -455,26 +333,20 @@ class _WorkspaceState extends State<_Workspace> {
                 ListTile(
                   contentPadding: EdgeInsets.zero,
                   leading: const Icon(LucideIcons.cloud),
-                  title: Text(
-                    '${farm.rain.toStringAsFixed(0)} mm rain · ${farm.heat.toStringAsFixed(0)}°C high',
-                  ),
-                  subtitle: Text(
-                    farm.weatherLive
-                        ? 'Open-Meteo · next 3 days · refreshed today'
-                        : _forecastSource,
-                  ),
+                  title: Text(farm.forecast),
+                  subtitle: const Text('Open-Meteo forecast · next 7 days'),
                 ),
-                if (farm.soilLive)
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(LucideIcons.layers),
-                    title: Text(
-                      '${farm.clay.toStringAsFixed(0)}% mapped clay · 0–5 cm',
-                    ),
-                    subtitle: const Text('SoilGrids mapped estimate'),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(LucideIcons.activity),
+                  title: Text(
+                    'Leaf disease risk ${farm.riskScore}/21 · ${farm.risk.label}',
                   ),
+                  subtitle: Text('Flag: ${farm.flag}'),
+                ),
                 const Text(
-                  'Forecasts and mapped soil are signals to check in the field, not a crop diagnosis.',
+                  'The forecast flags a risk; the farmer\'s answers confirm it. '
+                  'Neither is a diagnosis.',
                 ),
                 if (farm.note != null)
                   Padding(
@@ -626,22 +498,22 @@ class _WorkspaceState extends State<_Workspace> {
       context,
       MaterialPageRoute<void>(
         builder: (_) => _CheckInPage(
-          farm: farm,
-          onComplete: (concern, answers) {
-            setState(() {
-              farm.report = concern ? 'Concern reported' : 'Conditions normal';
-              farm.answers = answers;
-              farm.reportedAt = DateTime.now();
-              _events.insert(
-                0,
-                '${farm.name}: farmer check-in received · ${farm.report}',
-              );
-              _alerts.insert(
-                0,
-                '${farm.name}: ${concern ? 'farmer reported a concern' : 'farmer check-in received'}.',
-              );
-            });
-          },
+          onComplete: (outcome, finding, answers) => setState(() {
+            farm
+              ..outcome = outcome
+              ..finding = finding
+              ..answers = answers
+              ..reportedAt = DateTime.now()
+              ..checkInSent = true;
+            _events.insert(0, '${farm.name}: farmer answered · ${farm.status}');
+            _alerts.insert(
+              0,
+              outcome == CheckOutcome.otherCrop
+                  ? '${farm.name}: farmer grows $finding · ${farm.status}'
+                  : '${farm.name} · Flagged: ${farm.flag} · '
+                        'Answers say: $finding · ${farm.status}',
+            );
+          }),
         ),
       ),
     );
@@ -650,11 +522,7 @@ class _WorkspaceState extends State<_Workspace> {
       ..hideCurrentSnackBar()
       ..showSnackBar(
         SnackBar(
-          content: Text(
-            farm.concerningReport
-                ? 'Fieldwise alert: ${farm.name} needs review'
-                : '${farm.name}: check-in received',
-          ),
+          content: Text('${farm.name}: ${farm.status}'),
           action: SnackBarAction(
             label: 'View',
             onPressed: () => _openFarm(farm),
@@ -750,7 +618,8 @@ class _WorkspaceState extends State<_Workspace> {
         ),
         LayoutBuilder(
           builder: (context, constraints) {
-            final pageWidth = constraints.maxWidth * .72;
+            final pageWidth =
+                constraints.maxWidth * _farmCarouselViewportFraction;
             final mediaWidth =
                 pageWidth -
                 AlmanacDimens.sp2 * 2 -
@@ -1294,7 +1163,7 @@ class _WorkspaceState extends State<_Workspace> {
       final matchFilter =
           _filter == 'All' ||
           (_filter == 'Priority' && farm.score >= 55) ||
-          (_filter == 'Reports' && farm.report != null);
+          (_filter == 'Reports' && farm.outcome != null);
       return matchText && matchFilter;
     }).toList();
     return ListView(
@@ -1453,6 +1322,35 @@ class _WorkspaceState extends State<_Workspace> {
     );
   }
 
+  Widget _impactPanel() {
+    var caught = 0, urgent = 0, sent = 0, answered = 0;
+    final waiting = <String>[];
+    for (final farm in _farms) {
+      final outcome = farm.outcome;
+      if (outcome?.isCaughtEarly ?? false) caught++;
+      if (outcome?.isUrgent ?? false) urgent++;
+      if (farm.checkInSent) sent++;
+      if (outcome != null) answered++;
+      if (farm.checkInSent && outcome == null) waiting.add(farm.name);
+    }
+    return FarmMetricRow(
+      metrics: [
+        FarmMetric(
+          icon: LucideIcons.shieldCheck,
+          label: 'Caught early',
+          value: '$caught',
+          sub: '$urgent urgent · before reaching the cob',
+        ),
+        FarmMetric(
+          icon: Icons.dialpad,
+          label: 'USSD check-ins',
+          value: '$answered of $sent answered',
+          sub: waiting.isEmpty ? null : 'Waiting on ${waiting.join(', ')}',
+        ),
+      ],
+    );
+  }
+
   Widget _planPage() {
     final pending = _ranked
         .where(
@@ -1480,6 +1378,8 @@ class _WorkspaceState extends State<_Workspace> {
           '${math.min(3, pending.length)} suggested visits · ${calls.length} call${calls.length == 1 ? '' : 's'} · ${math.max(0, pending.length - 3)} next in queue',
           style: Theme.of(context).textTheme.bodyMedium,
         ),
+        const SizedBox(height: 17),
+        _impactPanel(),
         const SizedBox(height: 17),
         if (calls.isNotEmpty) ...[
           const SectionHeader(title: 'Calls'),
@@ -1584,6 +1484,18 @@ class _WorkspaceState extends State<_Workspace> {
       ),
       const SizedBox(height: 17),
       _panel(
+        child: SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          value: _consent,
+          onChanged: _setConsent,
+          title: const Text('Automatic USSD check-ins'),
+          subtitle: const Text(
+            'Farmers agreed to be asked by USSD when the forecast flags their farm.',
+          ),
+        ),
+      ),
+      const SizedBox(height: 9),
+      _panel(
         child: ListTile(
           contentPadding: EdgeInsets.zero,
           leading: const Icon(Icons.dialpad),
@@ -1594,13 +1506,13 @@ class _WorkspaceState extends State<_Workspace> {
         ),
       ),
       const SizedBox(height: 17),
-      for (final farm in _ranked.where((item) => item.report != null)) ...[
+      for (final farm in _ranked.where((item) => item.outcome != null)) ...[
         _panel(
           child: ListTile(
             contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.dialpad),
             title: Text(farm.name),
-            subtitle: Text(farm.report!),
+            subtitle: Text('${farm.status} · ${farm.finding}'),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => _openFarm(farm),
           ),
@@ -1643,13 +1555,7 @@ class _WorkspaceState extends State<_Workspace> {
           for (final farm in _ranked)
             ListTile(
               title: Text(farm.name),
-              subtitle: Text(
-                farm.wetFlag
-                    ? 'Rain and drainage check'
-                    : farm.dryFlag
-                    ? 'Heat and water check'
-                    : 'Crop check',
-              ),
+              subtitle: Text('${farm.crop} · ${farm.status}'),
               onTap: () {
                 Navigator.pop(ctx);
                 _openCheckIn(farm);
@@ -1682,18 +1588,19 @@ Color _riskColor(int score) => score >= 75
     : const Color(0xFF29835E);
 
 class _CheckInPage extends StatefulWidget {
-  const _CheckInPage({required this.farm, required this.onComplete});
-  final _Farm farm;
-  final void Function(bool concern, String answers) onComplete;
+  const _CheckInPage({required this.onComplete});
+  final void Function(CheckOutcome outcome, String finding, String answers)
+  onComplete;
 
   @override
   State<_CheckInPage> createState() => _CheckInPageState();
 }
 
 class _CheckInPageState extends State<_CheckInPage> {
-  int _step = 0;
-  bool? _concern;
-  final _answers = <String>[];
+  static const _crops = ['Maize', 'Beans', 'Tomato', 'Cabbage'];
+  String? _crop;
+  final _maize = MaizeCheck();
+  bool _done = false;
   final _entry = TextEditingController();
   String? _inputError;
 
@@ -1703,65 +1610,46 @@ class _CheckInPageState extends State<_CheckInPage> {
     super.dispose();
   }
 
-  bool get _wet => widget.farm.wetFlag;
-  String get _firstQuestion => _wet
-      ? 'Is there standing water in your field?'
-      : widget.farm.dryFlag
-      ? 'Are plants wilting during the day?'
-      : 'Have you noticed a new crop problem?';
-  String get _secondQuestion => _wet
-      ? 'Is it in one area or several areas?'
-      : 'Are several parts of the field affected?';
-  String get _question => _step == 0
-      ? _firstQuestion
-      : _step == 1
-      ? _secondQuestion
-      : 'How long have you noticed this?';
-  List<String> get _options => _step == 0
-      ? const ['Yes', 'No', 'Not sure']
-      : _step == 1
-      ? const ['One area', 'Several areas', 'Not sure']
-      : const ['Today', 'More than one day', 'Not sure'];
+  String get _question =>
+      _crop == null ? 'What are you growing?' : _maize.question;
+  List<String> get _options => _crop == null ? _crops : const ['Yes', 'No'];
 
   void _submit() {
     final choice = int.tryParse(_entry.text.trim());
-    if (choice == null || choice < 1 || choice > 3) {
-      setState(() => _inputError = 'Enter 1, 2 or 3');
+    if (choice == null || choice < 1 || choice > _options.length) {
+      setState(
+        () => _inputError = 'Enter a number from 1 to ${_options.length}',
+      );
       return;
     }
     _entry.clear();
-    setState(() => _inputError = null);
-    _answer(choice);
+    setState(() {
+      _inputError = null;
+      _answer(choice);
+    });
   }
 
   void _answer(int choice) {
-    if (_step == 0) {
-      _answers.add('$_firstQuestion ${_options[choice - 1]}');
-      if (choice == 2) {
-        _finish(false);
-      } else {
-        _concern = true;
-        setState(() => _step = 1);
+    if (_crop == null) {
+      final crop = _crop = _crops[choice - 1];
+      if (crop != 'Maize') {
+        _finish(CheckOutcome.otherCrop, crop.toLowerCase(), 'Crop: $crop');
       }
-    } else if (_step == 1) {
-      _answers.add('$_secondQuestion ${_options[choice - 1]}');
-      if (choice == 1) {
-        _finish(true);
-      } else {
-        setState(() => _step = 2);
-      }
-    } else {
-      _answers.add('$_question ${_options[choice - 1]}');
-      _finish(true);
+      return;
+    }
+    _maize.answer(choice == 1);
+    if (_maize.isDone) {
+      _finish(
+        _maize.outcome,
+        _maize.finding,
+        ['Crop: Maize', ..._maize.transcript].join(' · '),
+      );
     }
   }
 
-  void _finish(bool concern) {
-    widget.onComplete(concern, _answers.join(' · '));
-    setState(() {
-      _concern = concern;
-      _step = 3;
-    });
+  void _finish(CheckOutcome outcome, String finding, String answers) {
+    widget.onComplete(outcome, finding, answers);
+    _done = true;
   }
 
   @override
@@ -1785,11 +1673,11 @@ class _CheckInPageState extends State<_CheckInPage> {
                   Text('USSD', style: Theme.of(context).textTheme.titleMedium),
                   const SizedBox(height: 4),
                   Text(
-                    '*123# · ${widget.farm.name}',
+                    '*123# · FieldWise check-in',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                   const Divider(height: 25),
-                  if (_step < 3) ...[
+                  if (!_done) ...[
                     Text(_question),
                     const SizedBox(height: 12),
                     for (var i = 0; i < _options.length; i++)
@@ -1828,14 +1716,8 @@ class _CheckInPageState extends State<_CheckInPage> {
                     ),
                   ] else ...[
                     Text(
-                      'Response sent to field officer Felix.',
+                      'Thank you. Your answers have been sent to your field officer.',
                       style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 10),
-                    Text(
-                      _concern == true
-                          ? 'Please contact Felix today about the condition you reported.'
-                          : 'Conditions look normal for now. Contact Felix if anything changes.',
                     ),
                     Align(
                       alignment: Alignment.centerRight,
