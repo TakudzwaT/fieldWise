@@ -6,6 +6,7 @@
 
 import { MAX_CELLS, NAMED, inBounds, namedCells, snap, type Cell } from "./cells";
 import { BATCH_SIZE, FORECAST_DAYS, TIMEZONE, fetchForecasts } from "./openmeteo";
+import { docsPage, openapi } from "./openapi";
 import { Store, type StoredCell } from "./store";
 import { dailyRows, hourlyRows } from "./summarize";
 
@@ -59,6 +60,14 @@ export default {
 
 async function route(url: URL, store: Store): Promise<Response> {
   switch (url.pathname) {
+    case "/":
+      return Response.redirect(new URL("/docs", url).toString(), 302);
+    case "/docs":
+      return new Response(docsPage, {
+        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": `public, max-age=${CACHE_SECONDS}` },
+      });
+    case "/openapi.json":
+      return json(openapi);
     case "/health/live":
       return json({ status: "ok" }, 200, false);
     case "/locations":
@@ -73,7 +82,7 @@ async function route(url: URL, store: Store): Promise<Response> {
     case "/risk":
       return risk(url, store);
     default:
-      return error(404, "Not found. See the API README for the available routes.");
+      return error(404, "Not found. See /docs for the available routes.");
   }
 }
 

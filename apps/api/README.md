@@ -18,6 +18,11 @@ Cloudflare Workers Builds.
 > **Status:** live at https://fieldwise-api.takudzwamhizha132.workers.dev,
 > deployed by Cloudflare Workers Builds from the `backend` branch.
 
+**Interactive docs (Swagger):** https://fieldwise-api.takudzwamhizha132.workers.dev/docs
+— try every endpoint in the browser. The OpenAPI spec is at
+[`/openapi.json`](https://fieldwise-api.takudzwamhizha132.workers.dev/openapi.json),
+for generating clients (for example Dart for the mobile app).
+
 ---
 
 ## API reference
@@ -425,6 +430,7 @@ Check types with `npm run typecheck`.
 | File | What it does |
 |---|---|
 | `src/index.ts` | Routes, the hourly job, and finding or creating a location's cell |
+| `src/openapi.ts` | OpenAPI spec and the Swagger UI page. Update it when routes or fields change. |
 | `src/openmeteo.ts` | Fetching from Open-Meteo, with retries |
 | `src/summarize.ts` | Daily summaries and the disease risk rule |
 | `src/store.ts` | Reading and writing the D1 database |
