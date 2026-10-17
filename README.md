@@ -1,4 +1,4 @@
-# FieldWise — catch maize blight before it costs a harvest
+# FieldWise: catch maize blight before it costs a harvest
 
 **One field officer. 3,000 farms. FieldWise tells him which ones to visit first, before he can see the disease.**
 
@@ -8,7 +8,7 @@ Felix is an extension officer in Kasungu, Malawi. Across Malawi there is about [
 
 ## What FieldWise does
 
-1. **Forecast → risk.** Each farm's 7-day forecast is checked for the conditions grey leaf spot needs to spread: long wet-leaf hours, rain and warm days. [Published grey leaf spot models](https://dr.lib.iastate.edu/handle/20.500.12876/68099) predict risk from these weather signals. Each farm comes out Low, Medium or High.
+1. **The prioritisation engine decides who needs Felix first.** It runs on his phone, offline. It starts from the weather: each farm's 7-day forecast is checked for the conditions grey leaf spot needs to spread, which are long wet-leaf hours, rain and warm days. These are the same signals [published grey leaf spot models](https://dr.lib.iastate.edu/handle/20.500.12876/68099) use. Every farm gets a risk level of Low, Medium or High before any symptom shows. The engine then sends a check-in to each High-risk farm (step 2) and reranks the farm from the answers (step 3).
 2. **Ask the farmer.** Every High-risk farm gets a USSD check-in. That is numbered yes/no screens on any basic phone (1 = yes, 2 = no), with no smartphone and no data needed. No screen names a disease.
 3. **Re-sort the plan.** The answers rank Felix's day: urgent > confirmed > call > early signs > clear. A "wrong flag" (streak virus) jumps straight to urgent.
 4. **Felix decides.** He sees why each farm is ranked where it is and can change the order. FieldWise supports his judgement and never replaces it.
@@ -46,8 +46,8 @@ Each confirmed or ruled-out check-in becomes a labelled example. The pilot uses 
 | Innovation | Weather-driven disease risk sets off automatic farmer check-ins, and the check-ins re-rank a human officer's plan | P6 |
 | Feasibility | Risk engine runs on the phone, forecast and map are bundled offline, farmers need only a basic phone | P2, P4, P5 |
 | Deployability | Consent switch turns check-ins on or off, farmer data stays on the device, and the pilot metrics above are already chosen | P3, P7, P8, P9 |
-| Tech | Flutter app, pure-Dart engine, `flutter test test/felix`: **15/15 passing** | — |
-| Pitch | Live loop: start → check-in sent → farmer answers → farm jumps to the top of the plan | — |
+| Tech | Flutter app, pure-Dart engine, `flutter test test/felix`: **15/15 passing** | |
+| Pitch | Live loop: start → check-in sent → farmer answers → farm jumps to the top of the plan | |
 
 ## Repo
 
