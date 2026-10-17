@@ -26,6 +26,11 @@ const locationParams = [
   },
 ];
 
+const windowParams = [
+  { name: "hours", in: "query", description: "Hours to include, starting with the current hour.", schema: { type: "integer", minimum: 1, maximum: 24 * FORECAST_DAYS, default: 48 } },
+  { name: "past_hours", in: "query", description: "Extra hours before now to include.", schema: { type: "integer", minimum: 0, maximum: 2160, default: 0 } },
+];
+
 const errorResponses = {
   "400": { $ref: "#/components/responses/BadRequest" },
   "404": { $ref: "#/components/responses/NotFound" },
@@ -65,6 +70,7 @@ export const openapi = {
   tags: [
     { name: "Weather", description: "Stored forecast and recent weather" },
     { name: "Risk", description: "Crop disease risk from weather" },
+    { name: "Soil", description: "Soil pH, texture and drainage" },
     { name: "Service", description: "Health and coverage" },
   ],
   paths: {
@@ -102,11 +108,7 @@ export const openapi = {
         summary: "Hourly weather",
         description: "One row per hour, starting with the current hour.",
         operationId: "getHourlyWeather",
-        parameters: [
-          ...locationParams,
-          { name: "hours", in: "query", description: "Hours to return, starting with the current hour.", schema: { type: "integer", minimum: 1, maximum: 24 * FORECAST_DAYS, default: 48 } },
-          { name: "past_hours", in: "query", description: "Extra hours before now to include.", schema: { type: "integer", minimum: 0, maximum: 2160, default: 0 } },
-        ],
+        parameters: [...locationParams, ...windowParams],
         responses: {
           "200": {
             description: "Hourly rows",
@@ -116,6 +118,120 @@ export const openapi = {
                   type: "object",
                   required: ["location", "timezone", "fetched_at", "source", "hourly"],
                   properties: { ...headerFields, hourly: { type: "array", items: { $ref: "#/components/schemas/Hour" } } },
+                },
+              },
+            },
+          },
+          ...errorResponses,
+        },
+      },
+    },
+    "/weather/window": {
+      get: {
+        tags: ["Weather"],
+        summary: "Weather summary over a time window",
+        description:
+          "Summaries over the chosen hours, for rules like \"leaves wet ≥ 10 h\". Durations (`*_run_max`) are the longest unbroken run of hours. " +
+          "An hour counts as leaf-wet when Open-Meteo's leaf wetness probability is at least 50%, and humid when RH is at least 90%.",
+        operationId: "getWeatherWindow",
+        parameters: [...locationParams, ...windowParams],
+        responses: {
+          "200": {
+            description: "Window summary",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["location", "timezone", "fetched_at", "source", "window"],
+                  properties: { ...headerFields, window: { $ref: "#/components/schemas/WindowMetrics" } },
+                },
+              },
+            },
+          },
+          ...errorResponses,
+        },
+      },
+    },
+    "/soil": {
+      get: {
+        tags: ["Soil"],
+        summary: "Soil pH, texture and drainage for a farm",
+        description:
+          "From ISRIC SoilGrids (250 m), averaged over the top 30 cm. Points are rounded to 0.01° (about 1 km). " +
+          "The first request for a point takes 5-15 s; after that it is stored. Drainage is estimated from texture, not measured.",
+        operationId: "getSoil",
+        parameters: locationParams,
+        responses: {
+          "200": {
+            description: "Soil",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["point", "latitude", "longitude", "fetched_at", "soil", "source"],
+                  properties: {
+                    point: { type: "string", example: "-13.08_33.46" },
+                    latitude: { type: "number", example: -13.08 },
+                    longitude: { type: "number", example: 33.46 },
+                    fetched_at: { type: "string", format: "date-time" },
+                    soil: { $ref: "#/components/schemas/Soil" },
+                    source: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          "400": { $ref: "#/components/responses/BadRequest" },
+          "404": { description: "Unknown location name, or SoilGrids has no data for this point (water, town or rock)", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
+          "502": { description: "SoilGrids couldn't be reached. Try again shortly.", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
+          "503": { description: "The soil point limit is reached", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
+        },
+      },
+    },
+    "/assess": {
+      get: {
+        tags: ["Risk"],
+        summary: "Crop disease checks (decision tree)",
+        description: [
+          "Runs the FieldWise decision tree for each crop over the chosen window:",
+          "",
+          "| Crop | Disease | Branch | Conditions |",
+          "|---|---|---|---|",
+          "| Tomato | Late blight | weather | air temp 16-21 °C, leaves wet ≥ 10 h |",
+          "| Tomato | Bacterial wilt | soil | soil temp 29-35 °C, drainage poor |",
+          "| Maize | Maize leaf blights | weather | air temp 18-32 °C, wet or RH ≥ 90% for ≥ 12 h |",
+          "| Beans | Bean leaf diseases | weather | air temp 16-29 °C, leaves wet ≥ 10 h (≥ 24 h adds angular spot) |",
+          "| Cabbage | Black rot | weather | air temp 25-35 °C, RH ≥ 90%, rain in forecast |",
+          "| Cabbage | Clubroot | soil | soil temp 18-25 °C, pH ≤ 7.0, drainage poor |",
+          "",
+          "All conditions met: `flag` (SMS the farmer). One short: `watch` (no SMS; re-test on the next forecast). Otherwise `clear`.",
+          "Temperatures use the window mean; durations use the longest unbroken run. Missing soil counts as not met, and `complete` is false.",
+        ].join("\n"),
+        operationId: "assess",
+        parameters: [
+          ...locationParams,
+          { name: "crop", in: "query", description: "Comma-separated crops to check. Default: all.", schema: { type: "string", default: "tomato,maize,beans,cabbage" }, example: "maize,beans" },
+          ...windowParams,
+        ],
+        responses: {
+          "200": {
+            description: "Assessment",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["location", "timezone", "fetched_at", "source", "window", "soil", "any_flag", "results", "note"],
+                  properties: {
+                    ...headerFields,
+                    window: { $ref: "#/components/schemas/WindowMetrics" },
+                    soil: {
+                      description: "Null when no soil-branch crop was asked for; `{ error }` when soil couldn't be fetched.",
+                      oneOf: [{ $ref: "#/components/schemas/Soil" }, { $ref: "#/components/schemas/Error" }, { type: "null" }],
+                    },
+                    any_flag: { type: "boolean", description: "True if any disease is `flag`: send the SMS." },
+                    results: { type: "array", items: { $ref: "#/components/schemas/AssessResult" } },
+                    note: { type: "string" },
+                  },
                 },
               },
             },
@@ -269,6 +385,66 @@ export const openapi = {
         },
       },
       RiskLevel: { type: "string", enum: ["low", "medium", "high"], example: "medium" },
+      WindowMetrics: {
+        type: "object",
+        properties: {
+          start: { type: ["string", "null"], description: "First hour in the window (local)", example: "2026-10-17T04:00" },
+          end: { type: ["string", "null"], description: "Last hour in the window (local)", example: "2026-10-19T03:00" },
+          hours: { type: "integer", example: 48 },
+          air_temp_mean: { type: ["number", "null"], description: "°C", example: 24.84 },
+          air_temp_min: { type: ["number", "null"], description: "°C" },
+          air_temp_max: { type: ["number", "null"], description: "°C" },
+          soil_temp_mean: { type: ["number", "null"], description: "°C at 6 cm", example: 27.99 },
+          soil_temp_min: { type: ["number", "null"], description: "°C" },
+          soil_temp_max: { type: ["number", "null"], description: "°C" },
+          rh_max: { type: ["number", "null"], description: "Highest relative humidity, %" },
+          humid_hours: { type: "integer", description: "Hours with RH ≥ 90%" },
+          humid_run_max: { type: "integer", description: "Longest unbroken run of hours with RH ≥ 90%" },
+          leaf_wet_hours: { type: "integer", description: "Hours with leaf wetness probability ≥ 50%" },
+          leaf_wet_run_max: { type: "integer", description: "Longest unbroken run of leaf-wet hours" },
+          wet_or_humid_run_max: { type: "integer", description: "Longest unbroken run of hours that are leaf-wet or RH ≥ 90%" },
+          rain_total: { type: "number", description: "mm over the window" },
+          rain_hours: { type: "integer", description: "Hours with any precipitation" },
+        },
+      },
+      Soil: {
+        type: "object",
+        required: ["ph", "clay_pct", "sand_pct", "silt_pct", "drainage", "drainage_basis"],
+        properties: {
+          ph: { type: "number", description: "pH in water, top 30 cm", example: 6.5 },
+          clay_pct: { type: "number", example: 16.3 },
+          sand_pct: { type: "number", example: 75.6 },
+          silt_pct: { type: "number", example: 8.2 },
+          drainage: { type: "string", enum: ["poor", "moderate", "good"], description: "Clay ≥ 35% is poor; clay ≥ 20% with sand < 50% is moderate; otherwise good." },
+          drainage_basis: { type: "string" },
+        },
+      },
+      AssessResult: {
+        type: "object",
+        required: ["crop", "disease", "name", "branch", "status", "complete", "ask", "conditions"],
+        properties: {
+          crop: { type: "string", enum: ["tomato", "maize", "beans", "cabbage"] },
+          disease: { type: "string", example: "maize_leaf_blights" },
+          name: { type: "string", example: "Maize leaf blights" },
+          branch: { type: "string", enum: ["weather", "soil"] },
+          status: { type: "string", enum: ["flag", "watch", "clear"] },
+          complete: { type: "boolean", description: "False if any condition's data was missing" },
+          ask: { type: "string", description: "Question to confirm the disease with the farmer", example: "Are there rectangle or cigar-shaped spots on the leaves?" },
+          note: { type: "string", description: "Extra detail, only on some flags" },
+          conditions: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["condition", "value", "met"],
+              properties: {
+                condition: { type: "string", example: "Air temp 18-32 °C (window mean)" },
+                value: { type: ["number", "string", "null"], example: 24.84 },
+                met: { type: ["boolean", "null"], description: "Null when the data is missing" },
+              },
+            },
+          },
+        },
+      },
       Error: {
         type: "object",
         required: ["error"],

@@ -256,6 +256,140 @@ sightings, which weather data can't provide.
 
 ---
 
+### `GET /weather/window`
+
+Weather summed up over a chosen run of hours, for rules like "leaves wet for
+10 hours". Takes a location plus the same `hours` and `past_hours` as
+`/weather/hourly`.
+
+Example: `GET /weather/window?lat=-13.08&lon=33.46&hours=72`
+
+```json
+{
+  "location": { "cell": "-13.1_33.5", "latitude": -13.1, "longitude": 33.5 },
+  "window": {
+    "start": "2026-10-17T04:00", "end": "2026-10-20T03:00", "hours": 72,
+    "air_temp_mean": 24.84, "air_temp_min": 20.3, "air_temp_max": 31.6,
+    "soil_temp_mean": 27.99, "soil_temp_min": 22.6, "soil_temp_max": 36.3,
+    "rh_max": 63, "humid_hours": 0, "humid_run_max": 0,
+    "leaf_wet_hours": 0, "leaf_wet_run_max": 0, "wet_or_humid_run_max": 0,
+    "rain_total": 1.6, "rain_hours": 9
+  }
+}
+```
+
+(The header fields `timezone`, `fetched_at` and `source` are left out here.)
+
+- An hour is **leaf-wet** when Open-Meteo's leaf wetness probability is at
+  least 50%, and **humid** when relative humidity is at least 90%.
+- `*_run_max` fields are the **longest unbroken run** of such hours, not a
+  total. Disease needs leaves to stay wet, not to get wet now and then.
+
+---
+
+### `GET /soil`
+
+Soil pH, texture and drainage for a point, from
+[ISRIC SoilGrids](https://soilgrids.org) (250 m grid), averaged over the top
+30 cm. Takes `lat` and `lon` (or `location`).
+
+Example: `GET /soil?lat=-13.08&lon=33.46`
+
+```json
+{
+  "point": "-13.08_33.46", "latitude": -13.08, "longitude": 33.46,
+  "fetched_at": "2026-10-17T02:08:44Z",
+  "soil": {
+    "ph": 6.5, "clay_pct": 16.3, "sand_pct": 75.6, "silt_pct": 8.2,
+    "drainage": "good",
+    "drainage_basis": "Estimated from topsoil texture (clay and sand), not measured."
+  },
+  "source": "ISRIC SoilGrids (soilgrids.org), CC BY 4.0, 0-30 cm"
+}
+```
+
+- **The first request for a point is slow** (5–15 s), because SoilGrids is
+  slow. After that the point is stored, and answers are instant. Points are
+  rounded to 0.01° (about 1 km). Up to 2,000 points are stored.
+- **Drainage is an estimate.** No free service publishes drainage, so it comes
+  from texture: clay ≥ 35% is `poor`; clay ≥ 20% with sand < 50% is
+  `moderate`; anything else is `good`.
+- Points on water, towns or rock have no soil data and return 404.
+
+---
+
+### `GET /assess`
+
+Runs the FieldWise decision tree: for each crop, checks its diseases'
+conditions over a window and says whether to flag.
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `lat` and `lon`, or `location` | | The farm |
+| `crop` | all | Comma-separated: `tomato`, `maize`, `beans`, `cabbage` |
+| `hours` | 48 | Hours ahead to check, starting now (1–168) |
+| `past_hours` | 0 | Hours before now to include |
+
+| Crop | Disease | Branch | Conditions (all must hold to flag) |
+|---|---|---|---|
+| Tomato | Late blight | weather | air temp 16–21 °C, leaves wet ≥ 10 h |
+| Tomato | Bacterial wilt | soil | soil temp 29–35 °C, drainage poor |
+| Maize | Maize leaf blights | weather | air temp 18–32 °C, leaves wet or RH ≥ 90% for ≥ 12 h |
+| Beans | Bean leaf diseases | weather | air temp 16–29 °C, leaves wet ≥ 10 h (≥ 24 h adds an angular-spot note) |
+| Cabbage | Black rot | weather | air temp 25–35 °C, RH ≥ 90%, rain in the window |
+| Cabbage | Clubroot | soil | soil temp 18–25 °C, soil pH ≤ 7.0, drainage poor |
+
+Each disease gets a `status`:
+
+- `flag`: every condition met. Send the SMS; `ask` is the question for the
+  farmer's USSD check.
+- `watch`: exactly one condition short. No SMS; check again on the next
+  forecast.
+- `clear`: two or more short.
+
+How conditions are measured:
+
+- **Temperatures** use the mean over the window.
+- **Durations** use the longest unbroken run of hours.
+- **RH ≥ 90%** for black rot means the highest humidity in the window.
+- **Missing soil data** counts as not met, and that result has
+  `complete: false`.
+
+Example: `GET /assess?lat=-13.08&lon=33.46&crop=maize&hours=72`
+
+```json
+{
+  "location": { "cell": "-13.1_33.5", "latitude": -13.1, "longitude": 33.5 },
+  "window": { "hours": 72, "air_temp_mean": 24.84, "wet_or_humid_run_max": 0 },
+  "soil": null,
+  "any_flag": false,
+  "results": [
+    {
+      "crop": "maize", "disease": "maize_leaf_blights", "name": "Maize leaf blights",
+      "branch": "weather", "status": "watch", "complete": true,
+      "ask": "Are there rectangle or cigar-shaped spots on the leaves?",
+      "conditions": [
+        { "condition": "Air temp 18-32 °C (window mean)", "value": 24.84, "met": true },
+        { "condition": "Leaves wet or RH ≥ 90% for ≥ 12 h in a row", "value": 0, "met": false }
+      ]
+    }
+  ],
+  "note": "Decision support from weather and mapped soil, not a diagnosis. Confirm with the farmer's answers."
+}
+```
+
+(Shortened: the real `window` has every field from `/weather/window`.)
+
+`soil` is `null` when no soil-branch crop (tomato, cabbage) was asked for.
+If SoilGrids fails, it's `{ "error": "..." }`, and the weather results still
+come back.
+
+> **Known issue:** in the warm season the temperature condition is met most
+> days, so two-condition diseases (maize, beans) sit on `watch` whenever it's
+> dry. That's the diagram's rule as drawn; tighten it if `watch` is too noisy.
+
+---
+
 ### `GET /locations`
 
 Lists the named places and every cell being tracked.
@@ -430,6 +564,9 @@ Check types with `npm run typecheck`.
 | File | What it does |
 |---|---|
 | `src/index.ts` | Routes, the hourly job, and finding or creating a location's cell |
+| `src/assess.ts` | The decision tree: diseases, conditions and thresholds |
+| `src/window.ts` | Window summaries: means, longest wet and humid runs, rain |
+| `src/soil.ts` | SoilGrids lookup and drainage estimate |
 | `src/openapi.ts` | OpenAPI spec and the Swagger UI page. Update it when routes or fields change. |
 | `src/openmeteo.ts` | Fetching from Open-Meteo, with retries |
 | `src/summarize.ts` | Daily summaries and the disease risk rule |
@@ -457,3 +594,8 @@ Weather data is from [Open-Meteo](https://open-meteo.com), licensed under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Apps showing this
 data should credit Open-Meteo. Open-Meteo's free API is for non-commercial use.
 If FieldWise becomes commercial, it needs their paid plan.
+
+Soil data is from [ISRIC SoilGrids](https://soilgrids.org), licensed under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Apps showing it
+should credit ISRIC SoilGrids. SoilGrids' API asks for fair use (about 5
+requests a minute), which the stored points keep well within.

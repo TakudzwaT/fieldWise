@@ -7,6 +7,9 @@
 import { MAX_CELLS, NAMED, inBounds, namedCells, snap, type Cell } from "./cells";
 import { BATCH_SIZE, FORECAST_DAYS, TIMEZONE, fetchForecasts } from "./openmeteo";
 import { docsPage, openapi } from "./openapi";
+import { assess, parseCrops } from "./assess";
+import { fetchSoil, soilPoint, type Soil } from "./soil";
+import { windowMetrics } from "./window";
 import { Store, type StoredCell } from "./store";
 import { dailyRows, hourlyRows } from "./summarize";
 
@@ -22,6 +25,8 @@ const HOURLY_KEEP_DAYS = 90;
 const DAILY_KEEP_DAYS = 730;
 // Data changes hourly, so callers and caches may reuse a response this long.
 const CACHE_SECONDS = 300;
+// Soil points (about 1 km each) kept; each costs one slow SoilGrids call.
+const MAX_SOIL_POINTS = 2000;
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -79,6 +84,12 @@ async function route(url: URL, store: Store): Promise<Response> {
       return weatherDaily(url, store);
     case "/weather/hourly":
       return weatherHourly(url, store);
+    case "/weather/window":
+      return weatherWindow(url, store);
+    case "/soil":
+      return soilRoute(url, store);
+    case "/assess":
+      return assessRoute(url, store);
     case "/risk":
       return risk(url, store);
     default:
@@ -100,17 +111,83 @@ async function weatherDaily(url: URL, store: Store): Promise<Response> {
 async function weatherHourly(url: URL, store: Store): Promise<Response> {
   const cell = await resolve(url, store);
   if (cell instanceof Response) return cell;
+  const hourly = await readWindow(url, store, cell);
+  if (hourly instanceof Response) return hourly;
+  return json({ ...header(cell), hourly });
+}
+
+async function weatherWindow(url: URL, store: Store): Promise<Response> {
+  const cell = await resolve(url, store);
+  if (cell instanceof Response) return cell;
+  const hourly = await readWindow(url, store, cell);
+  if (hourly instanceof Response) return hourly;
+  return json({ ...header(cell), window: windowMetrics(hourly) });
+}
+
+async function soilRoute(url: URL, store: Store): Promise<Response> {
+  const point = parsePoint(url);
+  if (point instanceof Response) return point;
+  if (!inBounds(point.lat, point.lon)) return error(400, "That point is outside the area FieldWise covers (Malawi).");
+  const soil = await lookupSoil(store, point.lat, point.lon);
+  if ("error" in soil) return error(soil.status, soil.error);
+  return json({ ...soil, source: "ISRIC SoilGrids (soilgrids.org), CC BY 4.0, 0-30 cm" });
+}
+
+async function assessRoute(url: URL, store: Store): Promise<Response> {
+  const crops = parseCrops(url.searchParams.get("crop"));
+  if (typeof crops === "string") return error(400, crops);
+  const point = parsePoint(url);
+  if (point instanceof Response) return point;
+  const cell = await resolve(url, store);
+  if (cell instanceof Response) return cell;
+  const hourly = await readWindow(url, store, cell);
+  if (hourly instanceof Response) return hourly;
+
+  // Soil only matters for soil-branch diseases; a SoilGrids failure leaves those
+  // conditions unknown rather than failing the whole request.
+  const needsSoil = crops.some((crop) => crop === "tomato" || crop === "cabbage");
+  const soil = needsSoil ? await lookupSoil(store, point.lat, point.lon) : null;
+  const weather = windowMetrics(hourly);
+  const results = assess(crops, { weather, soil: soil && "soil" in soil ? soil.soil : null });
+  return json({
+    ...header(cell),
+    window: weather,
+    soil: soil === null ? null : "soil" in soil ? soil.soil : { error: soil.error },
+    any_flag: results.some((r) => r.status === "flag"),
+    results,
+    note: "Decision support from weather and mapped soil, not a diagnosis. Confirm with the farmer's answers.",
+  });
+}
+
+/** Hours from ?hours (ahead, default 48) and ?past_hours (before now, default 0). */
+async function readWindow(url: URL, store: Store, cell: StoredCell) {
   const hours = intParam(url, "hours", 48, 1, 24 * FORECAST_DAYS);
   const pastHours = intParam(url, "past_hours", 0, 0, 24 * HOURLY_KEEP_DAYS);
   if (hours instanceof Response) return hours;
   if (pastHours instanceof Response) return pastHours;
   const thisHour = Math.floor(Date.now() / HOUR_MS) * HOUR_MS;
-  const hourly = await store.readHourly(
-    cell.id,
-    localTime(thisHour - pastHours * HOUR_MS),
-    localTime(thisHour + hours * HOUR_MS),
-  );
-  return json({ ...header(cell), hourly });
+  return store.readHourly(cell.id, localTime(thisHour - pastHours * HOUR_MS), localTime(thisHour + hours * HOUR_MS));
+}
+
+type SoilLookup = { point: string; latitude: number; longitude: number; fetched_at: string; soil: Soil } | { error: string; status: number };
+
+/** Soil for a farm point, from storage or (once per point) from SoilGrids. */
+async function lookupSoil(store: Store, lat: number, lon: number): Promise<SoilLookup> {
+  const point = soilPoint(lat, lon);
+  const location = { point: point.id, latitude: point.latitude, longitude: point.longitude };
+  const stored = await store.getSoil(point.id);
+  if (stored) return { ...location, ...stored };
+  if ((await store.countSoil()) >= MAX_SOIL_POINTS) return { error: "FieldWise is storing its maximum number of soil points.", status: 503 };
+  try {
+    const soil = await fetchSoil(point);
+    if (!soil) return { error: "SoilGrids has no soil data for this point (water, town or rock).", status: 404 };
+    const fetchedAt = new Date().toISOString().slice(0, 19) + "Z";
+    await store.saveSoil(point, soil, fetchedAt);
+    return { ...location, fetched_at: fetchedAt, soil };
+  } catch (err) {
+    console.error("SoilGrids fetch failed", err);
+    return { error: "Couldn't fetch soil data from SoilGrids. Try again shortly.", status: 502 };
+  }
 }
 
 async function risk(url: URL, store: Store): Promise<Response> {
@@ -134,26 +211,32 @@ async function risk(url: URL, store: Store): Promise<Response> {
   });
 }
 
-/** Find the cell for ?location=name or ?lat=..&lon=.., fetching it if new. */
-async function resolve(url: URL, store: Store): Promise<StoredCell | Response> {
+/** The point asked for: ?location=name or ?lat=..&lon=.. */
+function parsePoint(url: URL): { lat: number; lon: number; name: string | null } | Response {
   const name = url.searchParams.get("location");
   const latParam = url.searchParams.get("lat");
   const lonParam = url.searchParams.get("lon");
-  let lat: number;
-  let lon: number;
   if (name) {
     if (!(name in NAMED)) return error(404, `Unknown location '${name}'. Known: ${Object.keys(NAMED).sort().join(", ")}.`);
-    [lat, lon] = NAMED[name];
-  } else if (latParam !== null && lonParam !== null) {
-    lat = Number(latParam);
-    lon = Number(lonParam);
+    const [lat, lon] = NAMED[name];
+    return { lat, lon, name };
+  }
+  if (latParam !== null && lonParam !== null) {
+    const lat = Number(latParam);
+    const lon = Number(lonParam);
     if (latParam.trim() === "" || lonParam.trim() === "" || !Number.isFinite(lat) || !Number.isFinite(lon)) {
       return error(400, "lat and lon must be numbers.");
     }
-  } else {
-    return error(400, "Pass lat and lon, or location.");
+    return { lat, lon, name: null };
   }
+  return error(400, "Pass lat and lon, or location.");
+}
 
+/** Find the weather cell for the requested point, fetching it if new. */
+async function resolve(url: URL, store: Store): Promise<StoredCell | Response> {
+  const point = parsePoint(url);
+  if (point instanceof Response) return point;
+  const { lat, lon, name } = point;
   const target: Cell = { ...snap(lat, lon), ...(name ? { name } : {}) };
   const existing = await store.getCell(target.id);
   if (existing) return existing;

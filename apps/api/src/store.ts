@@ -3,6 +3,7 @@
 // comparisons, and a full refresh is a few dozen row writes, not hundreds.
 
 import type { Cell } from "./cells";
+import type { Soil, SoilPoint } from "./soil";
 import { groupByDay, type Day, type Hour } from "./summarize";
 
 export interface StoredCell extends Cell {
@@ -79,6 +80,25 @@ export class Store {
     return results
       .flatMap(({ hours }) => JSON.parse(hours) as Hour[])
       .filter((hour) => hour.time >= start && hour.time < end);
+  }
+
+  async getSoil(id: string): Promise<{ soil: Soil; fetched_at: string } | null> {
+    const row = await this.db
+      .prepare("SELECT data, fetched_at FROM soil WHERE id = ?")
+      .bind(id)
+      .first<{ data: string; fetched_at: string }>();
+    return row && { soil: JSON.parse(row.data) as Soil, fetched_at: row.fetched_at };
+  }
+
+  async countSoil(): Promise<number> {
+    return (await this.db.prepare("SELECT count(*) AS n FROM soil").first<{ n: number }>())?.n ?? 0;
+  }
+
+  async saveSoil(point: SoilPoint, soil: Soil, fetchedAt: string) {
+    await this.db
+      .prepare("INSERT OR REPLACE INTO soil (id, latitude, longitude, data, fetched_at) VALUES (?, ?, ?, ?, ?)")
+      .bind(point.id, point.latitude, point.longitude, JSON.stringify(soil), fetchedAt)
+      .run();
   }
 
   async prune(hourlyBefore: string, dailyBefore: string): Promise<number> {
