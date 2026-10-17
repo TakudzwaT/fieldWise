@@ -1324,14 +1324,12 @@ class _WorkspaceState extends State<_Workspace> {
 
   Widget _impactPanel() {
     var caught = 0, urgent = 0, sent = 0, answered = 0;
-    final waiting = <String>[];
     for (final farm in _farms) {
       final outcome = farm.outcome;
       if (outcome?.isCaughtEarly ?? false) caught++;
       if (outcome?.isUrgent ?? false) urgent++;
       if (farm.checkInSent) sent++;
       if (outcome != null) answered++;
-      if (farm.checkInSent && outcome == null) waiting.add(farm.name);
     }
     return FarmMetricRow(
       metrics: [
@@ -1339,13 +1337,13 @@ class _WorkspaceState extends State<_Workspace> {
           icon: LucideIcons.shieldCheck,
           label: 'Caught early',
           value: '$caught',
-          sub: '$urgent urgent · before reaching the cob',
+          sub: '$urgent urgent',
         ),
         FarmMetric(
           icon: Icons.dialpad,
           label: 'USSD check-ins',
           value: '$answered of $sent answered',
-          sub: waiting.isEmpty ? null : 'Waiting on ${waiting.join(', ')}',
+          sub: '${sent - answered} waiting for answers',
         ),
       ],
     );
