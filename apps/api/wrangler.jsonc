@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "fieldwise-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+  "triggers": {
+    // 5 minutes past every hour (UTC; Malawi is UTC+2, so the minute is the same).
+    "crons": ["5 * * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fieldwise",
+      "database_id": "0f1f6675-bed7-40b2-930b-b9126f9087eb",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

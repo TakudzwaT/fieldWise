@@ -3,18 +3,19 @@
 Weather and crop-disease risk for farms in Malawi, served from our own storage
 so apps can call it as often as they like.
 
-- An hourly timer fetches forecasts from [Open-Meteo](https://open-meteo.com)
-  and saves them to Azure Table Storage.
-- The API reads only from storage. The one exception is the first request for
-  a new location, which fetches that location once.
-- Old data is deleted automatically: hourly rows after 90 days, daily rows
+- An hourly cron trigger fetches forecasts from [Open-Meteo](https://open-meteo.com)
+  and saves them to a Cloudflare D1 database.
+- The API reads only from the database. The one exception is the first request
+  for a new location, which fetches that location once.
+- Old data is deleted automatically: hourly data after 90 days, daily data
   after 2 years.
 
-It runs as one Azure Function App (Python) with one storage account.
+It runs as one [Cloudflare Worker](https://developers.cloudflare.com/workers/)
+(TypeScript) with one D1 database, on Cloudflare's free plan. Every push to the
+`backend` branch that touches `apps/api` deploys automatically.
 
-> **Status:** work in progress. Every endpoint has been tested against live
-> Open-Meteo data with an in-memory stand-in for storage. It has not yet run
-> against real Azure Table Storage or been deployed.
+> **Status:** every endpoint and the hourly job have been tested locally with
+> `wrangler dev` against live Open-Meteo data.
 
 ---
 
@@ -22,11 +23,12 @@ It runs as one Azure Function App (Python) with one storage account.
 
 ### Base URL
 
-The Function App's address, for example
-`https://fieldwise-api-xxxx.azurewebsites.net`. See [Deploying](#deploying)
-for how to find it. Routes have no `/api` prefix.
+`https://fieldwise-api.<subdomain>.workers.dev`, where `<subdomain>` is the
+Cloudflare account's workers.dev subdomain. Each deploy prints the exact URL
+in the GitHub Actions run summary.
 
-All endpoints are `GET`, need no key, and return JSON.
+All endpoints are `GET`, need no key, and return JSON. Any website may call
+them (CORS allows all origins), since the data is public and read-only.
 
 ### Choosing a location
 
@@ -46,8 +48,8 @@ shows which cell was used.
 before, the API fetches it from Open-Meteo first, which adds about a second.
 After that, the hourly timer keeps it up to date.
 
-**Limits.** Points outside Malawi are refused. At most 500 cells are tracked
-in total.
+**Limits.** Points outside Malawi are refused. At most 50 cells are tracked
+in total, to stay inside the free plan. See [Free plan limits](#free-plan-limits).
 
 ### Times and caching
 
@@ -55,13 +57,16 @@ in total.
   except `fetched_at`, which is UTC.
 - Successful responses send `Cache-Control: public, max-age=300`. The data
   only changes once an hour, so reusing a response for 5 minutes is safe.
+  Apps should honour this to save requests. (The Worker also caches responses
+  at Cloudflare's edge, but that only works on a custom domain, not on
+  workers.dev.)
 - Every weather response starts with the same header fields:
 
 ```json
 {
-  "location": { "cell": "-13.0_33.5", "name": "kasungu", "latitude": -13.0, "longitude": 33.5 },
+  "location": { "cell": "-13.0_33.5", "name": "kasungu", "latitude": -13, "longitude": 33.5 },
   "timezone": "Africa/Blantyre",
-  "fetched_at": "2026-10-17T00:21:03+00:00",
+  "fetched_at": "2026-10-17T00:50:05Z",
   "source": "Open-Meteo (open-meteo.com), model data"
 }
 ```
@@ -97,7 +102,7 @@ Example: `GET /weather/daily?lat=-13.08&lon=33.46&days=3&past_days=2`
 {
   "location": { "cell": "-13.1_33.5", "latitude": -13.1, "longitude": 33.5 },
   "timezone": "Africa/Blantyre",
-  "fetched_at": "2026-10-17T00:21:03+00:00",
+  "fetched_at": "2026-10-17T00:50:05Z",
   "source": "Open-Meteo (open-meteo.com), model data",
   "daily": [
     {
@@ -160,9 +165,9 @@ Example: `GET /weather/hourly?location=kasungu&hours=2`
 
 ```json
 {
-  "location": { "cell": "-13.0_33.5", "name": "kasungu", "latitude": -13.0, "longitude": 33.5 },
+  "location": { "cell": "-13.0_33.5", "name": "kasungu", "latitude": -13, "longitude": 33.5 },
   "timezone": "Africa/Blantyre",
-  "fetched_at": "2026-10-17T00:21:03+00:00",
+  "fetched_at": "2026-10-17T00:50:05Z",
   "source": "Open-Meteo (open-meteo.com), model data",
   "hourly": [
     {
@@ -199,9 +204,9 @@ Example: `GET /risk?location=kasungu`
 
 ```json
 {
-  "location": { "cell": "-13.0_33.5", "name": "kasungu", "latitude": -13.0, "longitude": 33.5 },
+  "location": { "cell": "-13.0_33.5", "name": "kasungu", "latitude": -13, "longitude": 33.5 },
   "timezone": "Africa/Blantyre",
-  "fetched_at": "2026-10-17T00:21:03+00:00",
+  "fetched_at": "2026-10-17T00:50:05Z",
   "source": "Open-Meteo (open-meteo.com), model data",
   "crops": ["maize", "groundnut"],
   "rule": "Each day scores 1 point each for 6+ hours above 90% humidity, any rain, and a mean temperature of 18-27 °C. The 7-day total gives the level: 0-7 low, 8-12 medium, 13-21 high.",
@@ -253,8 +258,8 @@ Lists the named places and every cell being tracked.
 {
   "named": ["kasungu"],
   "cells": [
-    { "cell": "-13.0_33.5", "latitude": -13.0, "longitude": 33.5, "fetched_at": "2026-10-17T00:21:03+00:00", "name": "kasungu" },
-    { "cell": "-13.1_33.5", "latitude": -13.1, "longitude": 33.5, "fetched_at": "2026-10-17T00:21:03+00:00" }
+    { "cell": "-13.0_33.5", "latitude": -13, "longitude": 33.5, "fetched_at": "2026-10-17T00:50:05Z", "name": "kasungu" },
+    { "cell": "-13.1_33.5", "latitude": -13.1, "longitude": 33.5, "fetched_at": "2026-10-17T00:50:05Z" }
   ]
 }
 ```
@@ -268,129 +273,160 @@ Errors return `{ "error": "<message>" }` and are never cached.
 | Status | When |
 |---|---|
 | 400 | No location given, `lat`/`lon` not numbers, point outside Malawi, or a parameter out of range |
-| 404 | Unknown `location` name |
+| 404 | Unknown `location` name, or unknown route |
+| 405 | Method other than `GET` |
+| 500 | Unexpected server error. Details are in the Worker logs. |
 | 502 | A new cell's first fetch from Open-Meteo failed. Try again shortly. |
-| 503 | The 500-cell limit is reached |
+| 503 | The 50-cell limit is reached |
 
 ---
 
 ## Deploying
 
-You do this once to create everything in Azure, then redeploy whenever the code
-changes. The commands below are untested against a real Azure account, so read
-any error output carefully.
+Deploys are automatic. Every push to the `backend` branch that changes
+`apps/api/` runs [`.github/workflows/deploy-api.yml`](../../.github/workflows/deploy-api.yml),
+which:
 
-### 1. Install the tools
+1. type-checks the code
+2. applies any new database migrations in `migrations/` to the live D1 database
+3. deploys the Worker
+4. calls `/health/live` and fails the run if it doesn't answer
 
-```bash
-brew install azure-cli
-```
+You can also run it by hand from GitHub: **Actions → Deploy API → Run workflow**.
 
-```bash
-brew tap azure/functions && brew install azure-functions-core-tools@4
-```
+### One-time setup
 
-```bash
-az login
-```
+This has to be done once per Cloudflare account. These steps are already done
+for the current account.
 
-### 2. Pick names and a region
+1. **Account.** Sign up at [dash.cloudflare.com](https://dash.cloudflare.com/sign-up)
+   (free, no card). Open **Workers & Pages** once so a workers.dev subdomain
+   exists.
+2. **API token for GitHub.** Go to **My Profile → API Tokens → Create Token**.
+   Use the **Edit Cloudflare Workers** template, then add the permission
+   **Account → D1 → Edit**. Store the token as a repo secret:
 
-Storage account names must be globally unique, 3–24 lowercase letters or
-digits. Function App names must also be globally unique.
+   ```bash
+   gh secret set CLOUDFLARE_API_TOKEN --repo TakudzwaT/fieldWise
+   ```
 
-```bash
-export RG=fieldwise-rg LOCATION=southafricanorth STORAGE=fieldwisestore$RANDOM APP=fieldwise-api-$RANDOM
-```
+3. **Account ID.** It's shown by `npx wrangler whoami`, or on the dashboard's
+   account home page. It isn't secret. Store it as a repo variable:
 
-Check that the region supports the Flex Consumption plan. If
-`southafricanorth` isn't listed, choose the nearest region that is.
+   ```bash
+   gh variable set CLOUDFLARE_ACCOUNT_ID --repo TakudzwaT/fieldWise
+   ```
 
-```bash
-az functionapp list-flexconsumption-locations --output table
-```
+4. **Database.** Run this once from `apps/api`, after `npx wrangler login`:
 
-### 3. Create the resources
+   ```bash
+   npx wrangler d1 create fieldwise
+   ```
 
-```bash
-az group create --name $RG --location $LOCATION
-```
-
-```bash
-az storage account create --name $STORAGE --resource-group $RG --location $LOCATION --sku Standard_LRS
-```
-
-```bash
-az functionapp create --resource-group $RG --name $APP --storage-account $STORAGE --flexconsumption-location $LOCATION --runtime python --runtime-version 3.12
-```
-
-This creates the Function App and an Application Insights resource for its
-logs. The app stores its data in the same storage account, through the
-`AzureWebJobsStorage` setting Azure adds automatically.
-
-### 4. Deploy the code
-
-Run this from `apps/api`. Azure installs the Python packages during the
-upload.
-
-```bash
-func azure functionapp publish $APP
-```
-
-To redeploy after changing the code, run the same command again.
-
-### 5. Check it works
-
-```bash
-curl "https://$(az functionapp show -g $RG -n $APP --query defaultHostName -o tsv)/health/live"
-```
-
-Next, request `/risk?location=kasungu`. The first call fetches Kasungu, and
-after that the timer refreshes it at 5 minutes past every hour.
+   Copy the `database_id` it prints into `wrangler.jsonc`, and commit it. The
+   ID isn't secret.
 
 ### Logs
 
-Open the Function App in the Azure portal, then **Monitoring → Logs** or
-**Application Insights**. Each hourly run logs a line like
-`Refreshed 2 cells, pruned 0 old rows`, and fetch failures are logged with the
-full error.
+In the Cloudflare dashboard, open **Workers & Pages → fieldwise-api → Logs**.
+Each hourly run logs a line like `Refreshed 2 of 2 cells, pruned 0 old rows`.
+Fetch failures are logged with the full error.
+
+To watch live logs from your terminal:
+
+```bash
+npx wrangler tail fieldwise-api
+```
+
+### Looking at the data
+
+To query the live database directly, run this from `apps/api`:
+
+```bash
+npx wrangler d1 execute fieldwise --remote --command "SELECT id, name, fetched_at FROM cells"
+```
 
 ### Removing everything
 
 This deletes the API and all stored data. It can't be undone.
 
 ```bash
-az group delete --name $RG
+npx wrangler delete fieldwise-api
 ```
+
+```bash
+npx wrangler d1 delete fieldwise
+```
+
+---
+
+## Free plan limits
+
+The Workers free plan has these limits that matter here (as of October 2026;
+check Cloudflare's pricing page for current numbers):
+
+| Limit | Free plan | What it means here |
+|---|---|---|
+| Requests | 100,000 a day | Every API call counts, cached or not. Apps should honour `Cache-Control`. |
+| CPU time | 10 ms per request or cron run | Parsing Open-Meteo's response takes CPU time, which is why at most 50 cells are tracked. |
+| D1 rows written | 100,000 a day | Each cell costs about 20 rows per hourly refresh, so about 500 a day. |
+| D1 storage | 5 GB | Far more than this needs. |
+
+To track more cells, upgrade to Workers Paid ($5/month). That raises the CPU
+limit to 30 seconds and the write limit to 50 million rows a month. Then raise
+`MAX_CELLS` in `src/cells.ts`.
 
 ---
 
 ## Local development
 
+You need Node.js 22 or newer. Run these from `apps/api`:
+
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+npm install
 ```
 
-Running the app locally with `func start` needs a storage emulator called
-Azurite, which runs on Node.js. Copy `local.settings.example.json` to
-`local.settings.json`, start Azurite, then run `func start`. The API is then at
-`http://localhost:7071`.
+```bash
+npm run db:migrate:local
+```
 
-## Settings and limits
+```bash
+npm run dev
+```
+
+The API is then at `http://localhost:8787`, using a local database in
+`.wrangler/`. To trigger the hourly job by hand:
+
+```bash
+curl "http://localhost:8787/__scheduled?cron=5+*+*+*+*"
+```
+
+Check types with `npm run typecheck`.
+
+## Code layout
+
+| File | What it does |
+|---|---|
+| `src/index.ts` | Routes, the hourly job, and finding or creating a location's cell |
+| `src/openmeteo.ts` | Fetching from Open-Meteo, with retries |
+| `src/summarize.ts` | Daily summaries and the disease risk rule |
+| `src/store.ts` | Reading and writing the D1 database |
+| `src/cells.ts` | Grid snapping, coverage area, cell limit, named places |
+| `migrations/` | Database schema. Add a new numbered file for each change, never edit an old one. |
+| `wrangler.jsonc` | Worker name, hourly schedule, database binding |
+
+## Settings
 
 These are constants in the code:
 
 | Setting | Where | Value |
 |---|---|---|
-| Hourly refresh time | `function_app.py`, `refresh_weather` | 5 minutes past each hour |
-| Data kept | `HOURLY_KEEP_DAYS`, `DAILY_KEEP_DAYS` | 90 days / 730 days |
-| Cache time | `CACHE_SECONDS` | 300 s |
-| Grid size, area, cell limit | `fieldwise/cells.py` | 0.1°, Malawi, 500 |
-| Named places | `cells.NAMED` | `kasungu` |
-| Risk thresholds | `fieldwise/summarize.py` | see [Disease risk rule](#disease-risk-rule) |
-
-Optional app setting `FIELDWISE_STORAGE`: a storage connection string to use
-instead of `AzureWebJobsStorage`.
+| Hourly refresh time | `wrangler.jsonc`, `triggers.crons` | 5 minutes past each hour |
+| Data kept | `HOURLY_KEEP_DAYS`, `DAILY_KEEP_DAYS` in `src/index.ts` | 90 days / 730 days |
+| Cache time | `CACHE_SECONDS` in `src/index.ts` | 300 s |
+| Grid size, area, cell limit | `src/cells.ts` | 0.1°, Malawi, 50 |
+| Named places | `NAMED` in `src/cells.ts` | `kasungu` |
+| Risk thresholds | `src/summarize.ts` | see [Disease risk rule](#disease-risk-rule) |
 
 ## Data source and licence
 
