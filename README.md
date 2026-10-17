@@ -40,11 +40,11 @@ Each confirmed or ruled-out check-in becomes a labelled example. The pilot uses 
 
 | Criterion | Evidence |
 |---|---|
-| **Topic:** measurable impact on food security | ≈180 kg maize saved per farm caught early |
-| **Innovation:** AI and automation at its core | Weather model auto-checks farmers, then reranks Felix's day |
-| **Feasibility:** fits field reality on cost, upkeep and training | Runs offline; farmers need only a basic phone, no data |
-| **Deployability:** ownership, upkeep and scale-up clear | Consent switch, on-device data, pilot metrics chosen |
-| **Tech:** robust build with edge cases handled | 15/15 tests: wrong flag, other crop, consent off |
+| **Topic** | Measurable food security: ≈180 kg of maize saved per farm caught early, about 3 months of food for a family of five |
+| **Innovation** | A prioritisation model that turns weather risk and farmer answers into Felix's next farm, so his visits go where blight is confirmed early |
+| **Feasibility** | Low cost and works on a weak network: USSD runs on any basic phone over plain GSM, with no smartphone, data bundle or internet. Numbered yes/no screens need minimal training, and Felix's app runs offline |
+| **Deployability** | Consent switch, farmer data kept on the device, pilot metrics chosen |
+| **Tech** | 15/15 tests pass, covering the wrong flag, a non-maize crop and consent switched off |
 
 ## Repo
 
