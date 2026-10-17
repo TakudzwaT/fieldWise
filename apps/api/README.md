@@ -292,7 +292,12 @@ which:
 3. deploys the Worker
 4. calls `/health/live` and fails the run if it doesn't answer
 
-You can also run it by hand from GitHub: **Actions → Deploy API → Run workflow**.
+You can also run it by hand from GitHub (**Actions → Deploy API → Run workflow**),
+but only once the workflow file is on `main`. Until then, a push that changes
+`apps/api/` is the only way to trigger it.
+
+The repo is public because GitHub Actions on private repos needs working
+billing on the owner's account; public repos run Actions for free.
 
 ### One-time setup
 
