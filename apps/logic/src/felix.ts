@@ -36,6 +36,8 @@ export interface Entry {
   state: State;
   /** Answers given so far, out of 8. */
   answered: number;
+  /** Waiting its turn behind another questionnaire, so not yet sent. */
+  queued: boolean;
   rank: Rank;
   /** True while the questionnaire is unfinished and the report is on part of the answers. */
   provisional: boolean;
@@ -49,7 +51,7 @@ export interface FarmLine extends Entry {
   /** The document's three-line format. */
   text: string;
   /** Other flags on the same farm in the window, less urgent than this one. */
-  also: Pick<Entry, "flag_id" | "flagged" | "rank" | "state">[];
+  also: Pick<Entry, "flag_id" | "flagged" | "rank" | "state" | "queued">[];
 }
 
 export function entry({ flag, session }: FlagRow): Entry {
@@ -74,6 +76,7 @@ export function entry({ flag, session }: FlagRow): Entry {
     source: flag.source,
     state,
     answered: given,
+    queued: session?.status === "queued",
     rank,
     provisional: !!report && !done,
     report,
@@ -100,7 +103,7 @@ export function priorityList(rows: FlagRow[]): FarmLine[] {
       farmer,
       label: RANK_LABEL[top.rank],
       text: textLine(farmer, top),
-      also: rest.map(({ flag_id, flagged, rank, state }) => ({ flag_id, flagged, rank, state })),
+      also: rest.map(({ flag_id, flagged, rank, state, queued }) => ({ flag_id, flagged, rank, state, queued })),
     });
   }
   return lines.sort(compareEntries);
@@ -172,8 +175,9 @@ export function summary(rows: FlagRow[], farmers: number): Summary {
   };
 }
 
+/** Most urgent first; among equals, the questionnaire in front of the farmer, then the newest. */
 function compareEntries(a: Entry, b: Entry): number {
-  return RANKS.indexOf(a.rank) - RANKS.indexOf(b.rank) || b.raised_at.localeCompare(a.raised_at);
+  return RANKS.indexOf(a.rank) - RANKS.indexOf(b.rank) || Number(a.queued) - Number(b.queued) || b.raised_at.localeCompare(a.raised_at);
 }
 
 /** "BANDA J. | Tomato | Flagged: late blight | ANSWERS SAY: bacterial wilt | Urgent", then answers and weather. */

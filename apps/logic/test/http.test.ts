@@ -78,7 +78,7 @@ describe("http", () => {
 describe("felix and demo routes", () => {
   it("serves the pages without a token, and no data in them", async () => {
     const call = client();
-    for (const path of ["/demo", "/dashboard", "/sim"]) {
+    for (const path of ["/demo", "/dashboard", "/sim", "/officer"]) {
       const response = await worker.fetch(new Request(`https://logic.test${path}`), {
         DB: testDb(),
         WEATHER_API: "https://weather.invalid",

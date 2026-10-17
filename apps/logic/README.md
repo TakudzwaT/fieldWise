@@ -12,8 +12,10 @@ extension officer.
 
 ## The demo
 
-Open `/demo` (or `/`): the farmer's phone on the left, Felix's dashboard on the
-right. Both pages ask for the admin token once and keep it in that browser.
+Open `/demo` (or `/`): the farmer's phone, Felix's phone, and Felix's
+dashboard, side by side (a screen at least 1300 pixels wide fits all three).
+The pages ask for the admin token once and keep it in that browser. The top
+bar has **Wet spell**, **Dry spell** and **Reset** for one farm or all.
 
 1. **Wet spell** (dashboard, demo controls) runs a made-up wet spell through
    the real rules. Every farm is flagged and gets an alert.
@@ -23,7 +25,11 @@ right. Both pages ask for the admin token once and keep it in that browser.
    shows "typing…", and the farmer's replies get ticks. It is a simulation;
    nothing leaves FieldWise. (Real WhatsApp is built too, below, but needs a
    Meta account and a deploy.)
-3. The dashboard updates every 3 seconds. A questionnaire still being answered
+3. Felix's phone and the dashboard update every 2 seconds. When a farmer
+   finishes, Felix's phone gets a push notification with what the answers
+   mean ("Go now: answers point to bacterial wilt, not late blight"); it also
+   notifies when flags go out and when an answer turns urgent mid-way. A
+   questionnaire still being answered
    is scored on the answers so far and marked *provisional*, so an urgent
    answer (streak virus, say) jumps to the top before the farmer finishes.
 4. **Dry spell** clears the flags and re-arms the alerts, so the next wet spell
@@ -31,8 +37,8 @@ right. Both pages ask for the admin token once and keep it in that browser.
    stay but forget their language, so the next run starts with the language
    question.
 
-`/sim` and `/dashboard` also work on their own; `/sim?farmer=F056` opens one
-farmer.
+`/sim`, `/officer` (Felix's phone) and `/dashboard` also work on their own;
+`/sim?farmer=F056` opens one farmer.
 
 ## How it decides
 
@@ -153,7 +159,7 @@ configured, every request is refused.
 | `GET /felix/priority` | Felix's list: one line per flagged farm, most urgent first, in the document's format (`text`) and as fields. `?days=` sets the window (1-90, default 14). |
 | `GET /felix/summary` | Totals for the same window: farms flagged, response rate, outcomes, wrong-flag rate, flags by disease, and what the answers point to |
 | `POST /demo/reset` | Delete every flag, session, track and message. Needs `{"confirm": "reset"}`. |
-| `GET /demo`, `/dashboard`, `/sim` | The demo pages. They hold no data, so they need no token to load. |
+| `GET /demo`, `/dashboard`, `/sim`, `/officer` | The demo pages. They hold no data, so they need no token to load. |
 | `GET /whatsapp`, `POST /whatsapp` | Meta's webhook. Checked by verify token and signature, not the admin token. |
 
 ### Felix's priority order
@@ -233,7 +239,7 @@ curl "http://localhost:8787/__scheduled?cron=15+*+*+*+*"
 |---|---|
 | `src/index.ts` | Routes, auth and the hourly job |
 | `src/felix.ts` | Felix's priority list and summary |
-| `src/pages.ts` | The demo pages: phone simulator, dashboard and `/demo` |
+| `src/pages.ts` | The demo pages: farmer's phone, Felix's phone, dashboard and `/demo` |
 | `src/checks.ts` | Forecast checks through the weather API, and the demo scenario |
 | `src/trigger.ts` | When a status change alerts |
 | `src/conversation.ts` | Alerts, replies, queueing, reminders and re-asks |

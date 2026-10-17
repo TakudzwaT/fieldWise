@@ -79,9 +79,19 @@ describe("Felix's priority list", () => {
     await conversations.raise(chirwa, "clubroot", "new", "forecast", {});
     const lines = priorityList(await store.flagRows());
     expect(lines).toHaveLength(1);
-    // Equally urgent, so the newer flag leads.
-    expect(lines[0].flagged).toBe("clubroot");
-    expect(lines[0].also).toEqual([expect.objectContaining({ flagged: "black rot", state: "waiting" })]);
+    // Equally urgent, so the one in front of the farmer leads; the other waits its turn.
+    expect(lines[0].flagged).toBe("black rot");
+    expect(lines[0].also).toEqual([expect.objectContaining({ flagged: "clubroot", state: "waiting", queued: true })]);
+  });
+
+  it("leads with the questionnaire in front of the farmer, not one queued behind it", async () => {
+    const banda = await farmer("F056");
+    await conversations.raise(banda, "late_blight", "new", "forecast", {});
+    clock = new Date(clock.getTime() + HOUR);
+    await conversations.raise(banda, "bacterial_wilt", "new", "forecast", {});
+    const [line] = priorityList(await store.flagRows());
+    expect(line).toMatchObject({ flagged: "late blight", queued: false });
+    expect(line.also).toEqual([expect.objectContaining({ flagged: "bacterial wilt", queued: true })]);
   });
 
   it("leaves out flags merged into an open questionnaire", async () => {

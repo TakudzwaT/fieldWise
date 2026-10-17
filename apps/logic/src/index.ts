@@ -12,7 +12,7 @@ import { inBounds } from "../../api/src/cells";
 import { apply, runChecks, scenarioAssessment, weatherApi, type ScenarioWeather } from "./checks";
 import { Conversations, newId } from "./conversation";
 import { priorityList, summary } from "./felix";
-import { dashboardPage, demoPage, simulatorPage } from "./pages";
+import { dashboardPage, demoPage, officerPage, simulatorPage } from "./pages";
 import { Outbox } from "./outbox";
 import { CROPS, DISEASES, QUESTIONNAIRES, type Crop, type DiseaseId, type Lang } from "./questionnaires";
 import { normalizePhone } from "./phone";
@@ -72,6 +72,7 @@ export default {
       if (url.pathname === "/" || url.pathname === "/demo") return html(demoPage);
       if (url.pathname === "/dashboard") return html(dashboardPage);
       if (url.pathname === "/sim") return html(simulatorPage);
+      if (url.pathname === "/officer") return html(officerPage);
     }
     if (!authorized(request, env)) return error(401, "Missing or wrong admin token.");
     try {

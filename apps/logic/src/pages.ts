@@ -158,13 +158,69 @@ ${body}
 </html>`;
 }
 
+// A phone frame shared by the farmer's and Felix's phones: bezel, status bar,
+// a notification banner that slides down, and a buzz. Each phone sets
+// --screen-bg, --screen-text, --bar-bg, --bar-text and --banner-icon.
+const PHONE_CSS = `
+body { min-height: 100vh; display: grid; place-items: start center; padding: 16px; }
+.wrap { width: min(390px, 100%); display: grid; gap: 12px; }
+.phone { position: relative; background: #0E0F0C; border-radius: 52px; padding: 12px; box-shadow: 0 0 0 2px #2A2B27 inset, 0 30px 60px rgba(0,0,0,.25); }
+.phone.buzz { animation: buzz .5s ease-in-out; }
+@keyframes buzz { 0%,100% { transform: none; } 20% { transform: translateX(-3px) rotate(-.6deg); } 40% { transform: translateX(3px) rotate(.6deg); } 60% { transform: translateX(-2px); } 80% { transform: translateX(2px); } }
+.island { position: absolute; top: 22px; left: 50%; transform: translateX(-50%); width: 104px; height: 30px; background: #000; border-radius: 20px; z-index: 5; }
+.screen { position: relative; background: var(--screen-bg); border-radius: 42px; overflow: hidden; display: flex; flex-direction: column; height: min(760px, calc(100vh - 110px)); min-height: 520px; color: var(--screen-text); }
+.statusbar { display: flex; justify-content: space-between; align-items: center; padding: 16px 30px 6px; font-size: 14px; font-weight: 600; background: var(--bar-bg); color: var(--bar-text); }
+.statusbar .sys { display: flex; gap: 5px; align-items: center; }
+.statusbar svg { display: block; fill: currentColor; }
+.banner { position: absolute; top: 56px; left: 10px; right: 10px; z-index: 6; background: rgba(250,250,250,.94); color: #111; backdrop-filter: blur(16px); border-radius: 18px; padding: 10px 14px 12px; box-shadow: 0 10px 30px rgba(0,0,0,.25); transform: translateY(calc(-100% - 80px)); opacity: 0; transition: transform .45s cubic-bezier(.2,.9,.25,1.1), opacity .2s; }
+.banner.show { transform: none; opacity: 1; }
+.banner .app { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #555; margin-bottom: 3px; }
+.banner .app i { width: 18px; height: 18px; border-radius: 5px; background: var(--banner-icon); display: inline-block; }
+.banner .app span { margin-left: auto; }
+.banner b { display: block; font-size: 14px; }
+.banner p { margin: 1px 0 0; font-size: 13.5px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+`;
+
+/** The phone's bezel, status bar and (hidden) notification banner, from the given app. */
+const phoneTop = (app: string) => `<div class="phone" id="phone"><div class="island"></div><div class="screen">
+    <div class="statusbar"><span id="clock">9:41</span><span class="sys" aria-hidden="true">
+      <svg width="17" height="11" viewBox="0 0 17 11"><rect x="0" y="7" width="3" height="4" rx="1"/><rect x="4.5" y="5" width="3" height="6" rx="1"/><rect x="9" y="2.5" width="3" height="8.5" rx="1"/><rect x="13.5" y="0" width="3" height="11" rx="1"/></svg>
+      <svg width="15" height="11" viewBox="0 0 15 11"><path d="M7.5 2.2c2.2 0 4.2.9 5.7 2.3l1.1-1.1A9.6 9.6 0 0 0 7.5.6 9.6 9.6 0 0 0 .7 3.4l1.1 1.1a8 8 0 0 1 5.7-2.3Zm0 3.2c1.3 0 2.5.5 3.4 1.3l1.1-1.1a6.4 6.4 0 0 0-9 0l1.1 1.1c.9-.8 2.1-1.3 3.4-1.3Zm0 3.1c.5 0 .9.2 1.2.5L7.5 10.2 6.3 9c.3-.3.7-.5 1.2-.5Z"/></svg>
+      <svg width="26" height="12" viewBox="0 0 26 12"><rect x=".5" y=".5" width="22" height="11" rx="3" fill="none" stroke="currentColor" opacity=".45"/><rect x="2" y="2" width="16" height="8" rx="1.8"/><rect x="23.5" y="4" width="1.8" height="4" rx=".9" opacity=".45"/></svg>
+    </span></div>
+    <div class="banner" id="banner" aria-live="polite"><div class="app"><i></i>${app}<span>now</span></div><b id="banner-title"></b><p id="banner-text"></p></div>`;
+
+const phoneBottom = `</div></div>`;
+
+const PHONE_CLIENT = `
+var bannerTimer;
+/** A notification sliding down from the top, with a buzz. */
+function banner(title, text) {
+  document.getElementById("banner-title").textContent = title;
+  document.getElementById("banner-text").textContent = text;
+  var b = document.getElementById("banner");
+  b.classList.add("show");
+  var phone = document.getElementById("phone");
+  phone.classList.remove("buzz");
+  void phone.offsetWidth;
+  phone.classList.add("buzz");
+  clearTimeout(bannerTimer);
+  bannerTimer = setTimeout(function () { b.classList.remove("show"); }, 5000);
+}
+function tickClock() {
+  document.getElementById("clock").textContent = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).replace(/\\s?[AP]M$/i, "");
+}
+tickClock();
+setInterval(tickClock, 10000);
+`;
+
 // A phone drawn like a WhatsApp chat, for presenting. Same flow as WhatsApp:
 // questions arrive with reply buttons inside the bubble, a tap sends the
 // button's label and its screen, ticks go sent -> delivered -> read, and a
 // banner slides down when FieldWise messages first.
 export const simulatorPage = page(
   "FieldWise Phone",
-  `
+  PHONE_CSS + `
 :root {
   --wa-head: #008069; --wa-on-head: #FFFFFF; --wa-wall: #EFEAE2; --wa-in: #FFFFFF; --wa-out: #D9FDD3;
   --wa-text: #111B21; --wa-meta: #667781; --wa-button: #027EB5; --wa-tick: #53BDEB; --wa-chip: #FFFFFF;
@@ -179,18 +235,9 @@ export const simulatorPage = page(
     --wa-doodle: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140' viewBox='0 0 140 140'%3E%3Cg fill='none' stroke='%23fff' stroke-opacity='.05' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M18 34c8-14 26-14 30 0-6 13-23 13-30 0zM33 34h-12'/%3E%3Cpath d='M98 18v22M98 26c-7-6-13-4-15 1M98 31c7-6 13-4 15 1'/%3E%3Ccircle cx='112' cy='92' r='9'/%3E%3Cpath d='M112 76v-5M112 113v-5M128 92h-5M101 92h-5'/%3E%3Cpath d='M20 98q9-12 18 0t18 0'/%3E%3Cpath d='M64 124c6-10 18-10 22 0-4 9-17 9-22 0z'/%3E%3Cpath d='M62 62l6 10 6-10z'/%3E%3C/g%3E%3C/svg%3E");
   }
 }
-body { min-height: 100vh; display: grid; place-items: start center; padding: 16px; }
-.wrap { width: min(390px, 100%); display: grid; gap: 12px; }
+.screen { --screen-bg: var(--wa-wall); --screen-text: var(--wa-text); --bar-bg: var(--wa-head); --bar-text: var(--wa-on-head); --banner-icon: #25D366; }
 .pick { display: flex; gap: 8px; align-items: center; }
 .pick select { flex: 1; font-size: 14px; }
-.phone { position: relative; background: #0E0F0C; border-radius: 52px; padding: 12px; box-shadow: 0 0 0 2px #2A2B27 inset, 0 30px 60px rgba(0,0,0,.25); }
-.phone.buzz { animation: buzz .5s ease-in-out; }
-@keyframes buzz { 0%,100% { transform: none; } 20% { transform: translateX(-3px) rotate(-.6deg); } 40% { transform: translateX(3px) rotate(.6deg); } 60% { transform: translateX(-2px); } 80% { transform: translateX(2px); } }
-.island { position: absolute; top: 22px; left: 50%; transform: translateX(-50%); width: 104px; height: 30px; background: #000; border-radius: 20px; z-index: 5; }
-.screen { position: relative; background: var(--wa-wall); border-radius: 42px; overflow: hidden; display: flex; flex-direction: column; height: min(760px, calc(100vh - 110px)); min-height: 520px; color: var(--wa-text); }
-.statusbar { display: flex; justify-content: space-between; align-items: center; padding: 16px 30px 6px; font-size: 14px; font-weight: 600; background: var(--wa-head); color: var(--wa-on-head); }
-.statusbar .sys { display: flex; gap: 5px; align-items: center; }
-.statusbar svg { display: block; fill: currentColor; }
 .wa-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px 10px 6px; background: var(--wa-head); color: var(--wa-on-head); }
 .wa-head .back { font-size: 26px; line-height: 1; padding: 0 2px 2px 4px; opacity: .95; }
 .avatar { width: 38px; height: 38px; border-radius: 50%; background: #E7F3EC; display: grid; place-items: center; flex: none; }
@@ -247,24 +294,11 @@ body { min-height: 100vh; display: grid; place-items: start center; padding: 16p
 .field input { flex: 1; border: 0; background: transparent; padding: 8px 0; font-size: 15px; color: var(--wa-text); outline: none; border-radius: 0; }
 .send { width: 46px; height: 46px; border-radius: 50%; border: 0; background: var(--wa-send); display: grid; place-items: center; flex: none; }
 .send svg { width: 22px; height: 22px; fill: #fff; }
-.banner { position: absolute; top: 56px; left: 10px; right: 10px; z-index: 6; background: rgba(250,250,250,.94); color: #111; backdrop-filter: blur(16px); border-radius: 18px; padding: 10px 14px 12px; box-shadow: 0 10px 30px rgba(0,0,0,.25); transform: translateY(calc(-100% - 80px)); opacity: 0; transition: transform .45s cubic-bezier(.2,.9,.25,1.1), opacity .2s; }
-.banner.show { transform: none; opacity: 1; }
-.banner .app { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #555; margin-bottom: 3px; }
-.banner .app i { width: 18px; height: 18px; border-radius: 5px; background: #25D366; display: inline-block; }
-.banner .app span { margin-left: auto; }
-.banner b { display: block; font-size: 14px; }
-.banner p { margin: 1px 0 0; font-size: 13.5px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .note { font-size: 12px; color: var(--muted); text-align: center; margin: 0; }
 `,
   `<main class="wrap">
   <div class="pick"><label for="farmer" class="muted" style="font-size:13px">Farmer</label><select id="farmer"></select></div>
-  <div class="phone" id="phone"><div class="island"></div><div class="screen">
-    <div class="statusbar"><span id="clock">9:41</span><span class="sys" aria-hidden="true">
-      <svg width="17" height="11" viewBox="0 0 17 11"><rect x="0" y="7" width="3" height="4" rx="1"/><rect x="4.5" y="5" width="3" height="6" rx="1"/><rect x="9" y="2.5" width="3" height="8.5" rx="1"/><rect x="13.5" y="0" width="3" height="11" rx="1"/></svg>
-      <svg width="15" height="11" viewBox="0 0 15 11"><path d="M7.5 2.2c2.2 0 4.2.9 5.7 2.3l1.1-1.1A9.6 9.6 0 0 0 7.5.6 9.6 9.6 0 0 0 .7 3.4l1.1 1.1a8 8 0 0 1 5.7-2.3Zm0 3.2c1.3 0 2.5.5 3.4 1.3l1.1-1.1a6.4 6.4 0 0 0-9 0l1.1 1.1c.9-.8 2.1-1.3 3.4-1.3Zm0 3.1c.5 0 .9.2 1.2.5L7.5 10.2 6.3 9c.3-.3.7-.5 1.2-.5Z"/></svg>
-      <svg width="26" height="12" viewBox="0 0 26 12"><rect x=".5" y=".5" width="22" height="11" rx="3" fill="none" stroke="currentColor" opacity=".45"/><rect x="2" y="2" width="16" height="8" rx="1.8"/><rect x="23.5" y="4" width="1.8" height="4" rx=".9" opacity=".45"/></svg>
-    </span></div>
-    <div class="banner" id="banner" aria-hidden="true"><div class="app"><i></i>WhatsApp<span>now</span></div><b>FieldWise</b><p id="banner-text"></p></div>
+  ${phoneTop("WhatsApp")}
     <header class="wa-head">
       <span class="back" aria-hidden="true">‹</span>
       <div class="avatar" aria-hidden="true"><svg viewBox="0 0 24 24"><path fill="#1D5233" d="M20 4c-8 0-14 4-15 11-.2 1.4-.2 2.9 0 4.4l1.6-.3c-.1-1.1-.1-2.2 0-3.2C9 14 12 11 16 9c-3.4 2.4-6 5.3-7.4 8.8 6.6.5 11.4-4.7 11.4-13.8Z"/></svg></div>
@@ -279,10 +313,10 @@ body { min-height: 100vh; display: grid; place-items: start center; padding: 16p
       <label class="field"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 18.2a8.2 8.2 0 1 1 0-16.4 8.2 8.2 0 0 1 0 16.4ZM8.5 11a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Zm7 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3ZM12 17.5c2.3 0 4.3-1.4 5.1-3.5H6.9c.8 2.1 2.8 3.5 5.1 3.5Z"/></svg><input type="text" id="text" placeholder="Message" autocomplete="off" aria-label="Reply"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6v11.5a4 4 0 0 1-8 0V5a2.5 2.5 0 0 1 5 0v10.5a1 1 0 0 1-2 0V6H10v9.5a2.5 2.5 0 0 0 5 0V5a4 4 0 0 0-8 0v12.5a5.5 5.5 0 0 0 11 0V6h-1.5Z"/></svg></label>
       <button class="send" type="submit" aria-label="Send"><svg viewBox="0 0 24 24"><path d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12.6 2-12.6 2Z"/></svg></button>
     </form>
-  </div></div>
+  ${phoneBottom}
   <p class="note" id="note">Simulated WhatsApp chat. Messages here never leave FieldWise.</p>
 </main>`,
-  `
+  PHONE_CLIENT + `
 var farmers = [], current = null, lastKey = null, lastMaxId = 0, sending = false, firstDraw = true;
 var seenIds = {};
 var select = document.getElementById("farmer");
@@ -355,19 +389,6 @@ function render(messages, pending) {
   firstDraw = false;
 }
 
-var bannerTimer;
-function banner(text) {
-  document.getElementById("banner-text").textContent = text.replace(/^FieldWise:\\s*/, "");
-  var b = document.getElementById("banner");
-  b.classList.add("show");
-  var phone = document.getElementById("phone");
-  phone.classList.remove("buzz");
-  void phone.offsetWidth;
-  phone.classList.add("buzz");
-  clearTimeout(bannerTimer);
-  bannerTimer = setTimeout(function () { b.classList.remove("show"); }, 4500);
-}
-
 function refresh() {
   if (!current || sending) return;
   var id = current.id;
@@ -378,7 +399,7 @@ function refresh() {
     if (key === lastKey) return;
     // FieldWise writing first (an alert, a reminder): ring the phone.
     var fresh = msgs.filter(function (m) { return m.id > lastMaxId; });
-    if (lastKey !== null && fresh.length && fresh[0].direction === "out") banner(fresh[0].body.split("\\n")[0]);
+    if (lastKey !== null && fresh.length && fresh[0].direction === "out") banner("FieldWise", fresh[0].body.split("\\n")[0].replace(/^FieldWise:\\s*/, ""));
     lastKey = key;
     lastMaxId = msgs.length ? msgs[msgs.length - 1].id : 0;
     render(msgs);
@@ -422,9 +443,6 @@ document.getElementById("compose").addEventListener("submit", function (e) {
   input.value = "";
 });
 select.addEventListener("change", function () { choose(select.value); });
-function tickClock() { document.getElementById("clock").textContent = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).replace(/\\s?[AP]M$/i, ""); }
-tickClock();
-setInterval(tickClock, 10000);
 
 gate(function () {
   api("/farmers").then(function (d) {
@@ -435,6 +453,219 @@ gate(function () {
     choose(new URLSearchParams(location.search).get("farmer") || store("fieldwise-sim-farmer"));
     setInterval(refresh, 1500);
   }).catch(function (e) { toast(e.message); });
+});
+`,
+);
+
+// Felix's phone, drawn like the Felix app (its "Warm Paper" colours). It reads
+// the same priority list as the dashboard and sends a push notification when
+// flags go out, when an answer turns urgent, and when a farmer finishes.
+export const officerPage = page(
+  "Felix Phone",
+  PHONE_CSS + `
+.screen { --screen-bg: var(--bg); --screen-text: var(--text); --bar-bg: var(--bg); --bar-text: var(--text); --banner-icon: var(--primary); }
+.pick { display: flex; gap: 8px; align-items: center; min-height: 38px; font-size: 13px; color: var(--muted); }
+.pick b { color: var(--text); font-weight: 600; }
+.app-head { display: flex; align-items: center; gap: 10px; padding: 6px 18px 10px; }
+.app-head .me { width: 38px; height: 38px; border-radius: 50%; background: var(--primary); color: var(--on-primary); display: grid; place-items: center; font-weight: 700; }
+.app-head .hi { flex: 1; min-width: 0; }
+.app-head .hi b { display: block; font-size: 17px; letter-spacing: -0.01em; }
+.app-head .hi span { font-size: 12.5px; color: var(--muted); }
+.bell { position: relative; width: 40px; height: 40px; border-radius: 50%; background: var(--surface); border: 1px solid var(--hairline); display: grid; place-items: center; }
+.bell svg { width: 20px; height: 20px; fill: var(--text); }
+.bell .badge { position: absolute; top: -3px; right: -3px; min-width: 19px; height: 19px; padding: 0 5px; border-radius: 999px; background: var(--red); color: #fff; font-size: 11px; font-weight: 700; display: grid; place-items: center; transform: scale(0); transition: transform .25s cubic-bezier(.2,.9,.25,1.3); }
+.bell .badge.on { transform: scale(1); }
+.body { flex: 1; overflow-y: auto; padding: 4px 14px 12px; display: grid; gap: 10px; align-content: start; }
+.hero { background: var(--ink); color: var(--on-ink); border-radius: 24px; padding: 16px 18px; display: grid; gap: 4px; }
+.hero small { color: var(--on-ink-muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
+.hero b { font-size: 34px; line-height: 1.05; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.hero span { font-size: 13.5px; color: var(--on-ink-muted); }
+.hero.urgent b { color: #FF9186; }
+.section { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; margin: 6px 4px 0; }
+.visit { background: var(--surface); border: 1px solid var(--hairline); border-radius: 18px; padding: 11px 14px 11px 16px; position: relative; overflow: hidden; text-align: left; width: 100%; display: grid; gap: 3px; }
+.visit::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--rank, var(--surface-3)); }
+.visit.changed { animation: flash 1.6s ease-out; }
+@keyframes flash { from { box-shadow: 0 0 0 3px var(--rank-soft, var(--primary-soft)); } to { box-shadow: 0 0 0 0 transparent; } }
+.r-go_now { --rank: var(--red); --rank-soft: var(--red-soft); }
+.r-this_week { --rank: var(--amber); --rank-soft: var(--amber-soft); }
+.r-no_response { --rank: var(--slate); --rank-soft: var(--slate-soft); }
+.r-recheck { --rank: var(--blue); --rank-soft: var(--blue-soft); }
+.r-waiting { --rank: var(--surface-3); --rank-soft: var(--surface-2); }
+.r-none { --rank: var(--green); --rank-soft: var(--green-soft); }
+.visit .top { display: flex; gap: 6px; align-items: center; }
+.visit .top b { font-size: 14.5px; letter-spacing: .01em; }
+.visit .top .crop { font-size: 12px; color: var(--muted); }
+.visit .top .chip { margin-left: auto; }
+.chip { border-radius: 999px; padding: 2px 9px; font-size: 11.5px; font-weight: 650; white-space: nowrap; }
+.chip.go_now { background: var(--red-soft); color: var(--on-red-soft); }
+.chip.this_week { background: var(--amber-soft); color: var(--on-amber-soft); }
+.chip.no_response { background: var(--slate-soft); color: var(--on-slate-soft); }
+.chip.recheck { background: var(--blue-soft); color: var(--on-blue-soft); }
+.chip.waiting { background: var(--surface-2); color: var(--muted); }
+.chip.none { background: var(--green-soft); color: var(--on-green-soft); }
+.visit .why { font-size: 13.5px; }
+.visit .why em { font-style: normal; font-weight: 650; }
+.visit .state { font-size: 12px; color: var(--muted); }
+.visit .more { display: none; margin-top: 6px; font-size: 12.5px; gap: 6px; }
+.visit.open .more { display: grid; }
+.visit .answers { font: 11.5px/1.5 var(--mono); color: var(--muted); background: var(--surface-2); border-radius: 10px; padding: 6px 8px; overflow-wrap: anywhere; }
+.visit ul { margin: 0; padding-left: 16px; }
+.calm { text-align: center; color: var(--muted); font-size: 14px; padding: 36px 16px; }
+.calm b { display: block; color: var(--text); font-size: 16px; margin-bottom: 4px; }
+.tabbar { margin: 0 14px 18px; background: var(--ink); border-radius: 999px; display: flex; justify-content: space-around; padding: 10px 6px; }
+.tabbar span { display: grid; justify-items: center; gap: 2px; font-size: 10.5px; color: var(--on-ink-muted); }
+.tabbar span.on { color: var(--on-ink); }
+.tabbar svg { width: 20px; height: 20px; fill: currentColor; }
+.note { font-size: 12px; color: var(--muted); text-align: center; margin: 0; }
+`,
+  `<main class="wrap">
+  <div class="pick"><b>Felix</b> · extension officer, Kasungu</div>
+  ${phoneTop("FieldWise")}
+    <div class="app-head">
+      <div class="me" aria-hidden="true">F</div>
+      <div class="hi"><b id="greeting">Good morning, Felix</b><span id="area">Kasungu</span></div>
+      <div class="bell" aria-label="Notifications"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22a2.5 2.5 0 0 0 2.5-2.5h-5A2.5 2.5 0 0 0 12 22Zm7-6V11a7 7 0 0 0-5.5-6.8V3.5a1.5 1.5 0 0 0-3 0v.7A7 7 0 0 0 5 11v5l-2 2v1h18v-1l-2-2Z"/></svg><span class="badge" id="badge"></span></div>
+    </div>
+    <div class="body" id="body"></div>
+    <nav class="tabbar" aria-hidden="true">
+      <span class="on"><svg viewBox="0 0 24 24"><path d="M12 3 3 10v11h6v-6h6v6h6V10Z"/></svg>Home</span>
+      <span><svg viewBox="0 0 24 24"><path d="M3 5l6-2 6 2 6-2v16l-6 2-6-2-6 2Zm6 0v14m6-12v14" fill="none" stroke="currentColor" stroke-width="2"/></svg>Farms</span>
+      <span><svg viewBox="0 0 24 24"><path d="M4 20V10h3v10Zm6.5 0V4h3v16Zm6.5 0v-7h3v7Z"/></svg>Insights</span>
+      <span><svg viewBox="0 0 24 24"><path d="M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9Zm0 2c-4.4 0-8 2.2-8 5v2h16v-2c0-2.8-3.6-5-8-5Z"/></svg>Profile</span>
+    </nav>
+  ${phoneBottom}
+  <p class="note">Felix's app, simulated. Updates as farmers answer.</p>
+</main>`,
+  PHONE_CLIENT + `
+var RANK_LABEL = { go_now: "Go now", this_week: "This week", no_response: "No reply: chase", recheck: "Re-check", waiting: "Waiting", none: "No action" };
+var seen = null, cards = {}, openId = null, farmCount = 0;
+
+function shortName(name) {
+  var w = name.trim().split(/\\s+/);
+  if (w.length < 2) return name.toUpperCase();
+  var last = w.pop();
+  return last.toUpperCase() + " " + w.map(function (x) { return x[0].toUpperCase() + "."; }).join(" ");
+}
+function cap(s) { return s ? s[0].toUpperCase() + s.slice(1) : s; }
+var PLURAL = { tomato: "tomatoes", maize: "maize", beans: "beans", cabbage: "cabbages" };
+function list(items) { return items.length > 1 ? items.slice(0, -1).join(", ") + " and " + items[items.length - 1] : items[0]; }
+
+/** What the answers mean, in one line for Felix. */
+function verdict(f) {
+  var r = f.report;
+  if (!r) return "Flagged for " + f.flagged + ". Waiting for the farmer.";
+  var say = list(r.answersSay);
+  switch (r.outcome) {
+    case "confirmed_urgent": return "Go now: " + say + " confirmed and spreading.";
+    case "confirmed": return (r.urgent ? "Go now: " : "Visit this week: ") + say + " confirmed.";
+    case "wrong_flag": return (r.urgent ? "Go now: " : "Visit this week: ") + "answers point to " + say + ", not " + f.flagged + ".";
+    case "early_signs": return "Early signs only. Re-check at the next forecast.";
+    default: return r.recheckInDays ? "Nothing seen yet. Ask again in " + r.recheckInDays + " days." : "All clear: nothing found.";
+  }
+}
+
+function visit(f) {
+  var r = f.report;
+  var why = r && r.answersSay.length
+    ? el("div", { class: "why" }, "Flagged " + f.flagged + " → ", el("em", {}, list(r.answersSay)))
+    : el("div", { class: "why" }, "Flagged " + f.flagged);
+  var state = f.state === "answered" ? "Answered" : f.state === "answering" ? "Answering, " + f.answered + " of 8" + (f.provisional ? " so far" : "")
+    : f.state === "no_response" ? "No reply after a reminder" : f.queued ? "Queued behind the current questions" : "Alert sent, no answers yet";
+  var node = el("button", { type: "button", class: "visit r-" + f.rank + (openId === f.flag_id ? " open" : ""),
+      on: { click: function () { openId = openId === f.flag_id ? null : f.flag_id; node.classList.toggle("open"); } } },
+    el("div", { class: "top" }, el("b", {}, shortName(f.farmer.name)), el("span", { class: "crop" }, cap(f.farmer.crop)), el("span", { class: "chip " + f.rank }, RANK_LABEL[f.rank])),
+    why,
+    el("div", { class: "state" }, state),
+    f.also.length > 0 && el("div", { class: "state" }, "Also: " + f.also.map(function (a) {
+      return a.flagged + (a.queued ? " (queued)" : a.state === "answered" ? " (answered)" : "");
+    }).join(", ")),
+    el("div", { class: "more" },
+      el("div", {}, verdict(f)),
+      r && r.answerLine && el("div", { class: "answers" }, r.answerLine),
+      f.conditions && el("div", { class: "state" }, f.conditions),
+      r && r.notes.length > 0 && el("ul", {}, r.notes.map(function (n) { return el("li", {}, n); }))));
+  return node;
+}
+
+function draw(farms) {
+  var body = document.getElementById("body");
+  body.textContent = "";
+  var urgent = farms.filter(function (f) { return f.rank === "go_now"; });
+  var badge = document.getElementById("badge");
+  badge.textContent = urgent.length;
+  badge.classList.toggle("on", urgent.length > 0);
+  if (!farms.length) {
+    append(body, el("div", { class: "calm" }, el("b", {}, "No farms flagged"), "The forecast doesn't favour disease on any of your farms this week."));
+    return;
+  }
+  var next = farms[0];
+  append(body, el("div", { class: "hero" + (urgent.length ? " urgent" : "") },
+    el("small", {}, urgent.length ? "Visit now" : "Flagged farms"),
+    el("b", {}, urgent.length ? urgent.length : farms.length),
+    el("span", {}, "Next: " + shortName(next.farmer.name) + " · " + cap(next.farmer.crop) + " · " + RANK_LABEL[next.rank])));
+  append(body, el("div", { class: "section" }, "Your visits"));
+  farms.forEach(function (f) {
+    var key = [f.rank, f.state, f.answered].join("|");
+    var node = visit(f);
+    if (cards[f.flag_id] !== undefined && cards[f.flag_id] !== key) node.classList.add("changed");
+    cards[f.flag_id] = key;
+    append(body, node);
+  });
+}
+
+/** The one notification worth sending for what changed since the last look. */
+function notify(farms) {
+  var now = {};
+  var names = {};
+  farms.forEach(function (f) {
+    now[f.flag_id] = { state: f.state, rank: f.rank };
+    names[f.flag_id] = f.flagged;
+    f.also.forEach(function (a) { now[a.flag_id] = { state: a.state, rank: a.rank }; names[a.flag_id] = a.flagged; });
+  });
+  if (seen) {
+    var finished = farms.filter(function (f) { return f.state === "answered" && seen[f.flag_id] && seen[f.flag_id].state !== "answered"; });
+    var turnedUrgent = farms.filter(function (f) { return f.rank === "go_now" && f.state !== "answered" && (!seen[f.flag_id] || seen[f.flag_id].rank !== "go_now"); });
+    var raised = Object.keys(now).filter(function (id) { return !seen[id]; });
+    if (finished.length) {
+      var f = finished[0];
+      banner(shortName(f.farmer.name) + " · " + cap(f.farmer.crop), verdict(f));
+    } else if (turnedUrgent.length) {
+      var u = turnedUrgent[0];
+      banner("Urgent · " + shortName(u.farmer.name) + " · " + cap(u.farmer.crop),
+        "Answers so far point to " + list(u.report.answersSay) + ". Go now.");
+    } else if (raised.length) {
+      var farmsRaised = farms.filter(function (f) {
+        return raised.indexOf(f.flag_id) !== -1 || f.also.some(function (a) { return raised.indexOf(a.flag_id) !== -1; });
+      });
+      var one = farmsRaised[0];
+      banner("Weather alert · Kasungu", farmsRaised.length === 1
+        ? shortName(one.farmer.name) + "'s " + (PLURAL[one.farmer.crop] || one.farmer.crop) + " flagged for " + list(raised.map(function (id) { return names[id]; }).sort()) + ". The farmer has been asked to check."
+        : raised.length + " disease flags on " + farmsRaised.length + " farms. Farmers have been asked to check their crops.");
+    }
+  }
+  seen = now;
+}
+
+function refresh() {
+  api("/felix/priority?days=14").then(function (d) {
+    notify(d.farms);
+    draw(d.farms);
+  }).catch(function () {});
+}
+
+function greet() {
+  var h = new Date().getHours();
+  document.getElementById("greeting").textContent = (h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening") + ", Felix";
+}
+greet();
+
+gate(function () {
+  api("/farmers").then(function (d) {
+    farmCount = d.farmers.length;
+    document.getElementById("area").textContent = "Kasungu · " + farmCount + " farms";
+  }).catch(function () {});
+  refresh();
+  setInterval(refresh, 2000);
 });
 `,
 );
@@ -576,7 +807,8 @@ function card(f) {
   } else if (r && r.likelyWrongFlag) {
     append(verdict, [el("span", { class: "arrow" }, "→"), el("span", { class: "say" }, "Answers point away from the flag")]);
   }
-  var progress = f.state === "answered" ? "Answered" : f.state === "answering" ? "Answering " + f.answered + " of 8" + (f.provisional ? " · provisional" : "") : STATE_LABEL[f.state];
+  var progress = f.state === "answered" ? "Answered" : f.state === "answering" ? "Answering " + f.answered + " of 8" + (f.provisional ? " · provisional" : "")
+    : f.queued ? "Queued behind the farmer's current questions" : STATE_LABEL[f.state];
   var notes = (r && r.notes) || [];
   var key = JSON.stringify([f.flag_id, f.rank, f.answered, f.state, f.also.length]);
   var node = el("article", { class: "card r-" + f.rank, "data-key": key },
@@ -715,7 +947,8 @@ gate(function () {
     var target = document.getElementById("target");
     farmers.forEach(function (f) { append(target, el("option", { value: f.id }, f.name + " · " + f.crop)); });
     refresh();
-    setInterval(refresh, 3000);
+    // Same pace as Felix's phone, so both update together on stage.
+    setInterval(refresh, 2000);
   }).catch(function (e) { toast(e.message); });
 });
 `,
@@ -728,17 +961,30 @@ body { height: 100vh; display: flex; flex-direction: column; }
 .bar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--hairline); flex-wrap: wrap; }
 .bar .sp { flex: 1; }
 .bar a { color: var(--primary); font-size: 14px; font-weight: 600; text-decoration: none; }
-.panes { flex: 1; display: grid; grid-template-columns: 420px minmax(0, 1fr); min-height: 0; }
+.controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.controls select { max-width: 240px; }
+.panes { flex: 1; display: grid; grid-template-columns: 420px 420px minmax(0, 1fr); min-height: 0; }
 .panes iframe { width: 100%; height: 100%; border: 0; display: block; }
 .panes iframe + iframe { border-left: 1px solid var(--hairline); }
-@media (max-width: 900px) {
+@media (max-width: 1300px) {
   body { height: auto; }
+  .panes { grid-template-columns: 1fr 1fr; }
+  .panes iframe { height: 880px; }
+  .panes iframe:last-child { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--hairline); }
+}
+@media (max-width: 860px) {
   .panes { grid-template-columns: minmax(0, 1fr); }
-  .panes iframe { height: 820px; }
   .panes iframe + iframe { border-left: 0; border-top: 1px solid var(--hairline); }
 }
 `,
-  `<div class="bar"><span class="brand"><i></i>FieldWise</span><span class="muted">Farmer's phone, left. Felix's dashboard, right.</span><span class="sp"></span><a href="/sim" target="_blank" rel="noopener">Phone only</a><a href="/dashboard" target="_blank" rel="noopener">Dashboard only</a></div>
+  `<div class="bar"><span class="brand"><i></i>FieldWise</span>
+  <span class="controls" id="controls">
+    <select id="target" aria-label="Which farm"><option value="">All farms</option></select>
+    <button class="btn primary" type="button" data-act="wet">Wet spell</button>
+    <button class="btn" type="button" data-act="dry">Dry spell</button>
+    <button class="btn danger" type="button" data-act="reset">Reset</button>
+  </span>
+  <span class="sp"></span><a href="/sim" target="_blank" rel="noopener">Farmer's phone</a><a href="/officer" target="_blank" rel="noopener">Felix's phone</a><a href="/dashboard" target="_blank" rel="noopener">Dashboard</a></div>
 <div class="panes" id="panes"></div>`,
   `
 gate(function () {
@@ -748,8 +994,53 @@ gate(function () {
   var panes = document.getElementById("panes");
   append(panes, [
     el("iframe", { src: "/sim" + hash, title: "Farmer's phone" }),
+    el("iframe", { src: "/officer" + hash, title: "Felix's phone" }),
     el("iframe", { src: "/dashboard" + hash, title: "Felix's dashboard" })
   ]);
+  var target = document.getElementById("target");
+  var farmers = [];
+  api("/farmers").then(function (d) {
+    farmers = d.farmers;
+    farmers.forEach(function (f) { append(target, el("option", { value: f.id }, f.name + " · " + f.crop)); });
+    // Follow the farmer shown on the phone, so a wet spell lands on that phone.
+    var shown = store("fieldwise-sim-farmer");
+    if (shown) target.value = shown;
+  }).catch(function (e) { toast(e.message); });
+
+  function scenario(weather) {
+    // One farm per request keeps each request inside D1's free-plan query limit.
+    var ids = target.value ? [target.value] : farmers.map(function (f) { return f.id; });
+    var alerts = 0;
+    return ids.reduce(function (p, id) {
+      return p.then(function () {
+        return api("/demo/scenario", { weather: weather, farmer_id: id }).then(function (d) {
+          alerts += d.results.filter(function (r) { return r.alert; }).length;
+        });
+      });
+    }, Promise.resolve()).then(function () {
+      toast((weather === "wet" ? "Wet" : "Dry") + " spell: " + alerts + " alert" + (alerts === 1 ? "" : "s") + " sent.");
+    });
+  }
+  var actions = {
+    wet: function () { return scenario("wet"); },
+    dry: function () { return scenario("dry"); },
+    reset: function () {
+      if (!confirm("Delete every flag, answer and message? Farmers stay.")) return Promise.resolve();
+      return api("/demo/reset", { confirm: "reset" }).then(function () {
+        toast("Demo reset.");
+        // Reload the panes so each starts clean.
+        panes.querySelectorAll("iframe").forEach(function (f) { f.src = f.src.split("#")[0] + hash; });
+      });
+    }
+  };
+  document.querySelectorAll("#controls button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      document.querySelectorAll("#controls button").forEach(function (x) { x.disabled = true; });
+      actions[b.getAttribute("data-act")]().catch(function (e) { toast(e.message); }).then(function () {
+        document.querySelectorAll("#controls button").forEach(function (x) { x.disabled = false; });
+      });
+    });
+  });
 });
 `,
 );
