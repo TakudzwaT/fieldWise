@@ -15,8 +15,8 @@ It runs as one [Cloudflare Worker](https://developers.cloudflare.com/workers/)
 `backend` branch that touches `apps/api` deploys automatically, through
 Cloudflare Workers Builds.
 
-> **Status:** every endpoint and the hourly job have been tested locally with
-> `wrangler dev` against live Open-Meteo data.
+> **Status:** live at https://fieldwise-api.takudzwamhizha132.workers.dev,
+> deployed by Cloudflare Workers Builds from the `backend` branch.
 
 ---
 
