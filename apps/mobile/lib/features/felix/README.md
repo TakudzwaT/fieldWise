@@ -23,6 +23,35 @@ success check, source details, and Felix's correction controls.
 4. Return to Home or the Plan tab to see the changed order. Open the farm and
    choose Change for a quick correction, or record a visit from Plan.
 
+## Live mode: signed in to FieldWise
+
+Profile > **Sign in** takes Felix's officer access code (`fw_...`, made by the
+FieldWise admin with `POST /officers/OFF01/token` on the logic layer). The
+app then reads his farmers, priority list and call-back requests from the
+logic layer (`apps/logic`) every 30 seconds, instead of using the local rules:
+
+- The order is FieldWise's: forecast flags scored by the farmers' own answers
+  (Visit today, Visit this week, No reply: call, Re-check, Waiting for
+  farmer). Felix's **Change** corrections still apply on top.
+- A farm shows what the farmer answered and what the answers point to.
+- **Message farmer** sends a ready-made reply or Felix's own words, by SMS to
+  keypad phones or WhatsApp to smartphones. **Call** opens the dialler.
+- **Call back** on Home lists farmers who asked Felix to call from the USSD
+  menu; **Done** clears one.
+- The in-app check-in is hidden: farmers answer on their own phones.
+
+The server address defaults to the deployed logic Worker. For a local one:
+
+```sh
+flutter run --dart-define=FIELDWISE_URL=http://10.0.2.2:8789
+```
+
+(`10.0.2.2` is the host machine from an Android emulator; use
+`http://localhost:8789` on the iOS simulator.) **Sign out** goes back to the
+offline demo data. The code is kept in the device's secure storage.
+
+## Offline demo data
+
 The bundled Kasungu forecast is a dated snapshot from
 `TakudzwaT/fieldWise:src/data/kasungu_weather.json` (16 October 2026). The app
 requests fresh farm-level weather directly from Open-Meteo and mapped clay from

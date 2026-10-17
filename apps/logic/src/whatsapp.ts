@@ -1,0 +1,421 @@
+// WhatsApp through Meta's WhatsApp Cloud API. Setup: docs/whatsapp-setup.md.
+//
+//   GET  /whatsapp  Meta's one-time webhook check (hub.verify_token).
+//   POST /whatsapp  Farmers' messages and delivery receipts. Every call is
+//                   checked against the X-Hub-Signature-256 HMAC of the raw
+//                   body with the app secret; anything else is refused.
+//
+// Questions go out as interactive messages with Yes/No reply buttons. The
+// "which plant?" list is buttons too, or a list message when more than three
+// plants are at risk. These are only allowed within 24 hours of the farmer's
+// last message; outside that, WhatsApp fails the message with code 131047,
+// and if a template is configured FieldWise sends it instead so the farmer can
+// tap Start.
+
+import type { Prompt } from "./engine";
+import { normalizePhone } from "./phone";
+import type { Deliver, Outgoing } from "./outbox";
+import { NAMED } from "../../api/src/cells";
+import { newId, type Conversations } from "./conversation";
+import { NOT_REGISTERED, stoppedText } from "./messages";
+import type { Farmer, Store } from "./store";
+
+export interface WhatsAppEnv {
+  WHATSAPP_TOKEN?: string;
+  WHATSAPP_PHONE_NUMBER_ID?: string;
+  WHATSAPP_APP_SECRET?: string;
+  WHATSAPP_VERIFY_TOKEN?: string;
+  WHATSAPP_API_VERSION?: string;
+  WHATSAPP_TEMPLATE?: string;
+  WHATSAPP_TEMPLATE_LANG?: string;
+  WHATSAPP_OPEN_JOIN?: string;
+}
+
+export interface WhatsAppConfig {
+  token: string;
+  phoneNumberId: string;
+  apiVersion: string;
+  template: string | null;
+  templateLang: string;
+}
+
+/** Outside the 24-hour window: only a template can be sent. */
+export const OUTSIDE_WINDOW = 131047;
+export const DEFAULT_API_VERSION = "v25.0";
+/** Logged bodies of template sends start with this, so they can be found again. */
+export const TEMPLATE_PREFIX = "[template ";
+
+// WhatsApp's limits for interactive messages.
+const HEADER_MAX = 60;
+const BODY_MAX = 1024;
+const BUTTON_TITLE_MAX = 20;
+const ROW_TITLE_MAX = 24;
+const LIST_ROWS_MAX = 10;
+const LIST_BUTTON = "Choose / Sankhani";
+const TEXT_MAX = 4096;
+
+/** Sending is configured when there is a token and a phone number id. */
+export function whatsappConfig(env: WhatsAppEnv): WhatsAppConfig | null {
+  if (!env.WHATSAPP_TOKEN || !env.WHATSAPP_PHONE_NUMBER_ID) return null;
+  return {
+    token: env.WHATSAPP_TOKEN,
+    phoneNumberId: env.WHATSAPP_PHONE_NUMBER_ID,
+    apiVersion: env.WHATSAPP_API_VERSION || DEFAULT_API_VERSION,
+    template: env.WHATSAPP_TEMPLATE || null,
+    templateLang: env.WHATSAPP_TEMPLATE_LANG || "en",
+  };
+}
+
+export class WhatsAppError extends Error {
+  constructor(
+    message: string,
+    readonly code: number | null,
+  ) {
+    super(message);
+  }
+}
+
+/** The WhatsApp message body for one outgoing message. */
+export function payload(to: string, message: Outgoing): Record<string, unknown> {
+  const base = { messaging_product: "whatsapp", recipient_type: "individual", to: to.replace(/^\+/, "") };
+  if (typeof message === "string" || message.options.length === 0 || message.options.length > LIST_ROWS_MAX) {
+    return { ...base, type: "text", text: { body: clip(plain(message), TEXT_MAX), preview_url: false } };
+  }
+  const prompt: Prompt = message;
+  if (prompt.options.length > 3) {
+    return {
+      ...base,
+      type: "interactive",
+      interactive: {
+        type: "list",
+        ...(prompt.header ? { header: { type: "text", text: clip(prompt.header, HEADER_MAX) } } : {}),
+        body: { text: clip(prompt.body, BODY_MAX) },
+        action: {
+          button: LIST_BUTTON,
+          sections: [
+            { rows: prompt.options.map((o) => ({ id: `${prompt.key}:${o.reply}`, title: clip(o.label, ROW_TITLE_MAX) })) },
+          ],
+        },
+      },
+    };
+  }
+  return {
+    ...base,
+    type: "interactive",
+    interactive: {
+      type: "button",
+      ...(prompt.header ? { header: { type: "text", text: clip(prompt.header, HEADER_MAX) } } : {}),
+      body: { text: clip(prompt.body, BODY_MAX) },
+      action: {
+        buttons: prompt.options.map((o) => ({
+          type: "reply",
+          reply: { id: `${prompt.key}:${o.reply}`, title: clip(o.label, BUTTON_TITLE_MAX) },
+        })),
+      },
+    },
+  };
+}
+
+/** The template that stands in for an alert outside the 24-hour window. */
+export function templatePayload(config: WhatsAppConfig, farmer: Farmer): Record<string, unknown> {
+  return {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: farmer.phone.replace(/^\+/, ""),
+    type: "template",
+    template: {
+      name: config.template,
+      language: { code: config.templateLang },
+      components: [{ type: "body", parameters: [{ type: "text", text: "crops" }] }],
+    },
+  };
+}
+
+async function post(config: WhatsAppConfig, body: Record<string, unknown>, fetchFn: typeof fetch): Promise<{ id: string }> {
+  const response = await fetchFn(`https://graph.facebook.com/${config.apiVersion}/${config.phoneNumberId}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = (await response.json().catch(() => ({}))) as {
+    messages?: { id: string }[];
+    error?: { message?: string; code?: number; error_data?: { details?: string } };
+  };
+  if (!response.ok || !data.messages?.[0]?.id) {
+    const code = data.error?.code ?? null;
+    const detail = data.error?.error_data?.details ?? data.error?.message ?? `HTTP ${response.status}`;
+    throw new WhatsAppError(`WhatsApp ${code ?? response.status}: ${detail}`, code);
+  }
+  return { id: data.messages[0].id };
+}
+
+export function whatsappDeliver(config: WhatsAppConfig, fetchFn: typeof fetch = fetch): Deliver {
+  return (farmer, message) => post(config, payload(farmer.phone, message), fetchFn);
+}
+
+export async function sendTemplate(
+  config: WhatsAppConfig,
+  store: Store,
+  farmer: Farmer,
+  now: Date,
+  fetchFn: typeof fetch = fetch,
+): Promise<void> {
+  const body = `${TEMPLATE_PREFIX}${config.template}] FieldWise: the weather this week can bring problems to your crops.`;
+  let providerId: string | null = null;
+  let error: string | null = null;
+  try {
+    providerId = (await post(config, templatePayload(config, farmer), fetchFn)).id;
+  } catch (err) {
+    error = err instanceof Error ? err.message : String(err);
+  }
+  await store.logMessage({
+    farmer_id: farmer.id,
+    direction: "out",
+    channel: "whatsapp",
+    body,
+    at: now.toISOString(),
+    status: error ? "failed" : "sent",
+    error,
+    provider_id: providerId,
+  });
+}
+
+/**
+ * After a failure outside the 24-hour window, send the template instead, at
+ * most once a day per farmer, so the farmer can tap Start to carry on.
+ */
+export async function templateFallback(
+  config: WhatsAppConfig | null,
+  store: Store,
+  farmer: Farmer,
+  now: Date,
+  fetchFn: typeof fetch = fetch,
+): Promise<boolean> {
+  if (!config?.template) return false;
+  const since = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+  if (await store.lastMessageLike(farmer.id, TEMPLATE_PREFIX, since)) return false;
+  await sendTemplate(config, store, farmer, now, fetchFn);
+  return true;
+}
+
+// Webhook
+
+/** Meta's one-time GET that proves we own the webhook URL. */
+export function verifySubscription(url: URL, verifyToken: string | undefined): Response {
+  const mode = url.searchParams.get("hub.mode");
+  const token = url.searchParams.get("hub.verify_token");
+  const challenge = url.searchParams.get("hub.challenge");
+  if (verifyToken && mode === "subscribe" && token !== null && constantTimeEqual(token, verifyToken) && challenge) {
+    return new Response(challenge, { headers: { "Content-Type": "text/plain" } });
+  }
+  return new Response("Forbidden", { status: 403 });
+}
+
+/** Checks X-Hub-Signature-256 ("sha256=<hex HMAC of the raw body>"). */
+export async function validSignature(raw: string, header: string | null, appSecret: string): Promise<boolean> {
+  if (!header?.startsWith("sha256=")) return false;
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(appSecret), { name: "HMAC", hash: "SHA-256" }, false, [
+    "sign",
+  ]);
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(raw)));
+  const expected = [...mac].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return constantTimeEqual(header.slice("sha256=".length).toLowerCase(), expected);
+}
+
+export interface Inbound {
+  id: string;
+  phone: string;
+  text: string;
+  name: string | null;
+  /** For a button tap: the screen the button belonged to (see Prompt.key). */
+  screen?: string;
+}
+
+export interface Receipt {
+  id: string;
+  status: "sent" | "delivered" | "read" | "failed";
+  code: number | null;
+  error: string | null;
+}
+
+/** Farmers' messages and delivery receipts from one webhook call. */
+export function parseWebhook(body: unknown): { messages: Inbound[]; receipts: Receipt[] } {
+  const messages: Inbound[] = [];
+  const receipts: Receipt[] = [];
+  const entries = (body as { entry?: unknown[] })?.entry ?? [];
+  for (const entry of entries as { changes?: { field?: string; value?: any }[] }[]) {
+    for (const change of entry.changes ?? []) {
+      const value = change.value ?? {};
+      const names = new Map<string, string>(
+        (value.contacts ?? []).map((c: any) => [String(c.wa_id), c.profile?.name ?? null] as [string, string]),
+      );
+      for (const m of value.messages ?? []) {
+        const phone = normalizePhone(`+${String(m.from ?? "")}`);
+        if (!phone || !m.id) continue;
+        // Text, a tap on a reply button, or a tap on a template's quick reply.
+        const text =
+          m.type === "text"
+            ? m.text?.body
+            : m.type === "interactive"
+              ? (m.interactive?.button_reply?.id ?? m.interactive?.list_reply?.id)
+              : m.type === "button"
+                ? (m.button?.payload ?? m.button?.text)
+                : null;
+        // Voice notes, photos and the like still count as the farmer getting in
+        // touch; they get the current screen again.
+        const message: Inbound = { id: String(m.id), phone, text: typeof text === "string" ? text : "", name: names.get(String(m.from)) ?? null };
+        // Our buttons' and list rows' ids are "<screen>:<reply>", e.g. "s3:1" or "pick:2".
+        const tagged = m.type === "interactive" ? /^(lang|ward|pick|more|s\d+):(\d+)$/.exec(message.text) : null;
+        if (tagged) {
+          message.screen = tagged[1];
+          message.text = tagged[2];
+        }
+        messages.push(message);
+      }
+      for (const s of value.statuses ?? []) {
+        if (!s.id || !["sent", "delivered", "read", "failed"].includes(s.status)) continue;
+        const err = s.errors?.[0];
+        receipts.push({
+          id: String(s.id),
+          status: s.status,
+          code: typeof err?.code === "number" ? err.code : null,
+          error: err ? `WhatsApp ${err.code}: ${err.error_data?.details ?? err.title ?? err.message ?? "failed"}` : null,
+        });
+      }
+    }
+  }
+  return { messages, receipts };
+}
+
+export interface WebhookDeps {
+  store: Store;
+  conversations: Conversations;
+  config: WhatsAppConfig | null;
+  openJoin: boolean;
+  now: () => Date;
+  fetchFn?: typeof fetch;
+}
+
+/** Handle one webhook call's receipts and messages. */
+export async function processWebhook({ messages, receipts }: ReturnType<typeof parseWebhook>, deps: WebhookDeps): Promise<void> {
+  const { store, conversations, config, openJoin, now, fetchFn = fetch } = deps;
+
+  for (const receipt of receipts) {
+    const message = await store.setDeliveryStatus(receipt.id, receipt.status, receipt.error);
+    if (receipt.status !== "failed" || receipt.code !== OUTSIDE_WINDOW || !message) continue;
+    if (message.body.startsWith(TEMPLATE_PREFIX)) continue;
+    const farmer = await store.getFarmer(message.farmer_id);
+    if (farmer) await templateFallback(config, store, farmer, now(), fetchFn);
+  }
+
+  for (const message of messages) {
+    // Meta retries webhooks; each message is handled once.
+    if (!(await store.markSeen(message.id, now().toISOString()))) continue;
+    const farmer = await store.getFarmerByPhone(message.phone);
+    if (farmer && isStop(message.text)) {
+      await stop(farmer, deps, fetchFn);
+      continue;
+    }
+    if (farmer) {
+      await conversations.inbound(message.phone, message.text, { screen: message.screen });
+      continue;
+    }
+    await stranger(message, deps, fetchFn);
+  }
+}
+
+const STOP_WORDS = new Set(["stop", "unsubscribe", "stopall", "lekani", "siyani"]);
+
+export function isStop(text: string): boolean {
+  return STOP_WORDS.has(text.trim().toLowerCase().replace(/[^\p{L}]+/gu, ""));
+}
+
+/**
+ * STOP: confirm, then delete the farmer and everything about them. Only on
+ * WhatsApp; the simulator's seeded farmers can't be deleted this way.
+ */
+async function stop(farmer: Farmer, { store, config }: WebhookDeps, fetchFn: typeof fetch): Promise<void> {
+  if (config) {
+    await post(config, payload(farmer.phone, stoppedText(farmer.lang)), fetchFn).catch((err) => console.error("STOP reply failed", err));
+  }
+  await store.deleteFarmer(farmer.id);
+  console.log(`Farmer ${farmer.id} sent STOP and was deleted`);
+}
+
+/** A message from a number that isn't registered: join, or say how to. */
+async function stranger(message: Inbound, { store, config, openJoin, now }: WebhookDeps, fetchFn: typeof fetch): Promise<void> {
+  if (!config) return;
+  if (!openJoin || !parseJoin(message.text)) {
+    const reply = openJoin ? JOIN_HELP : NOT_REGISTERED;
+    // Not logged: there is no farmer to log it against.
+    await post(config, payload(message.phone, reply), fetchFn).catch((err) => console.error("Reply to stranger failed", err));
+    return;
+  }
+  const [latitude, longitude] = NAMED.kasungu;
+  const farmer: Farmer = {
+    id: newId("frm"),
+    name: (message.name ?? "").trim().slice(0, 60) || "WhatsApp farmer",
+    farm_name: null,
+    phone: message.phone,
+    latitude,
+    longitude,
+    lang: null,
+    channel: "whatsapp",
+    created_at: now().toISOString(),
+  };
+  await store.addFarmer(farmer);
+  await store.logMessage({ farmer_id: farmer.id, direction: "in", channel: "whatsapp", body: message.text, at: now().toISOString() });
+  const deliver = whatsappDeliver(config, fetchFn);
+  const body = joinedText(farmer.name);
+  let providerId: string | null = null;
+  let error: string | null = null;
+  try {
+    providerId = (await deliver(farmer, body)).id;
+  } catch (err) {
+    error = err instanceof Error ? err.message : String(err);
+  }
+  await store.logMessage({
+    farmer_id: farmer.id,
+    direction: "out",
+    channel: "whatsapp",
+    body,
+    at: now().toISOString(),
+    status: error ? "failed" : "sent",
+    error,
+    provider_id: providerId,
+  });
+}
+
+// Joining by WhatsApp
+
+/** "join", or "join" with anything after it (an old "join tomato" still works). */
+export function parseJoin(text: string): boolean {
+  const first = text.trim().toLowerCase().split(/\s+/)[0];
+  return first === "join" || first === "lowani";
+}
+
+export const JOIN_HELP =
+  "FieldWise: to join, reply JOIN.\n\n" + "FieldWise: kuti mulowe, yankhani JOIN.";
+
+export const joinedText = (name: string) =>
+  `FieldWise: welcome, ${name}. You are registered near Kasungu. ` +
+  "We will message you when the weather puts your crops at risk. Text STOP at any time to stop.\n\n" +
+  `FieldWise: takulandirani, ${name}. Mwalembetsedwa pafupi ndi Kasungu. ` +
+  "Tidzakutumizirani uthenga nyengo ikaika mbewu zanu pachiopsezo. Tumizani STOP nthawi iliyonse kuti musiye.";
+
+function plain(message: Outgoing): string {
+  if (typeof message === "string") return message;
+  return [message.header, message.body].filter(Boolean).join("\n");
+}
+
+function clip(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+export function constantTimeEqual(a: string, b: string): boolean {
+  const x = new TextEncoder().encode(a);
+  const y = new TextEncoder().encode(b);
+  let diff = x.length ^ y.length;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) diff |= (x[i] ?? 0) ^ (y[i] ?? 0);
+  return diff === 0;
+}
