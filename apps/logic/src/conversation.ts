@@ -3,19 +3,43 @@
 // scored for Felix. A farmer answers one questionnaire at a time; any others
 // wait in a queue and start when the current one is done.
 //
-// Housekeeping (sweep) runs on the cron: one reminder after 24 h of silence,
-// "no response" 24 h after that, and black rot's re-ask a week after a clear.
+// Housekeeping (sweep) runs on the cron: one reminder after a day of silence
+// (sooner on WhatsApp, see reminderDueAt), "no response" 24 h after that, and
+// black rot's re-ask a week after a clear.
+//
+// Replies can arrive at the same moment (two quick taps on WhatsApp are two
+// webhook calls). A session is only saved if nobody saved it since it was
+// read; otherwise the reply is handled again on the fresh session.
 
-import { render, reply, start, toText } from "./engine";
-import { alertText, noQuestionsText, nudgeText, NOT_REGISTERED, reminderText } from "./messages";
+import { render, reply, screenKey, start, toText } from "./engine";
+import { alertText, noQuestionsText, nudgeText, NOT_REGISTERED, reminderText, staleText } from "./messages";
 import type { Outbox, Outgoing } from "./outbox";
 import type { DiseaseId } from "./questionnaires";
 import { score } from "./scoring";
-import type { Farmer, Flag, FlagDetails, FlagReason, FlagSource, Store, StoredSession } from "./store";
+import type { Channel, Farmer, Flag, FlagDetails, FlagReason, FlagSource, Store, StoredSession } from "./store";
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-export const REMIND_AFTER_MS = DAY_MS;
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
 export const NO_RESPONSE_AFTER_MS = DAY_MS;
+// How many times a reply is retried when another reply saves first.
+const SAVE_ATTEMPTS = 3;
+
+/**
+ * When a silent session's reminder is due (ms). The simulator waits a day.
+ * WhatsApp only delivers free-form messages for 24 hours after the farmer's
+ * own last message, and a reminder at a day would always miss it, so on
+ * WhatsApp it goes out 20 hours after the last activity, or 3 hours before
+ * the window closes if that is sooner, but never within 4 hours of the last
+ * activity.
+ */
+export function reminderDueAt(channel: Channel, lastActivity: string, lastInbound: string | null): number {
+  const activity = Date.parse(lastActivity);
+  if (channel !== "whatsapp") return activity + DAY_MS;
+  const preferred = activity + 20 * HOUR_MS;
+  if (!lastInbound) return preferred;
+  const beforeWindowCloses = Date.parse(lastInbound) + DAY_MS - 3 * HOUR_MS;
+  return Math.max(activity + 4 * HOUR_MS, Math.min(preferred, beforeWindowCloses));
+}
 // The empty string is a message with no text (a voice note, photo or sticker).
 const RESUME = new Set(["", "start", "hi", "hello", "hey", "menu", "resume", "continue", "yambani", "moni", "moniwa"]);
 
@@ -59,44 +83,57 @@ export class Conversations {
       completed_at: null,
       report: null,
       recheck_due_at: null,
+      version: 0,
     };
     await this.store.addFlagWithSession(flag, session);
     if (startsNow) await this.outbox.send(farmer, [alertText(reason, farmer.crop, farmer.lang), render(session.state)]);
     return flag;
   }
 
-  /** A message from a farmer. Returns what was sent back. */
-  async inbound(phone: string, text: string): Promise<string[]> {
+  /**
+   * A message from a farmer. Returns what was sent back. `screen` is set for a
+   * WhatsApp button tap: the screen the button belonged to.
+   */
+  async inbound(phone: string, text: string, { screen }: { screen?: string } = {}): Promise<string[]> {
     const farmer = await this.store.getFarmerByPhone(phone);
     if (!farmer) return [NOT_REGISTERED];
     const at = this.now().toISOString();
     await this.store.logMessage({ farmer_id: farmer.id, direction: "in", channel: farmer.channel, body: text, at });
 
-    const session = await this.store.activeSession(farmer.id);
-    if (!session) return this.send(farmer, [noQuestionsText(farmer.lang)]);
+    for (let attempt = 0; attempt < SAVE_ATTEMPTS; attempt++) {
+      const replies = await this.handle(farmer, text, screen, at);
+      if (replies) return this.send(farmer, replies);
+    }
+    console.error(`Reply from ${farmer.id} kept conflicting with other replies; dropped`);
+    return [];
+  }
 
-    // A greeting, a template's Start button, or a voice note or photo: show the
-    // current screen again rather than counting it as a wrong answer.
-    if (RESUME.has(text.trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ""))) {
+  /** One attempt at a reply. Null when another reply saved the session first. */
+  private async handle(farmer: Farmer, text: string, screen: string | undefined, at: string): Promise<Outgoing[] | null> {
+    const session = await this.store.activeSession(farmer.id);
+    if (!session) return [noQuestionsText(farmer.lang)];
+
+    // A greeting, a template's Start button, or a voice note or photo shows the
+    // current screen again rather than counting as a wrong answer. So does a
+    // tap on an earlier question's button, which would otherwise be taken as
+    // the answer to the current one.
+    const resume = RESUME.has(text.trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ""));
+    const stale = screen !== undefined && screen !== screenKey(session.state);
+    if (resume || stale) {
       session.last_activity_at = at;
-      await this.store.saveSession(session);
-      return this.send(farmer, [render(session.state)]);
+      if (!(await this.store.saveSession(session))) return null;
+      return stale ? [staleText(farmer.lang), render(session.state)] : [render(session.state)];
     }
 
     const turn = reply(session.state, text);
     session.state = turn.session;
     session.last_activity_at = at;
-    if (turn.session.lang && !farmer.lang) {
-      await this.store.setLang(farmer.id, turn.session.lang);
-      farmer.lang = turn.session.lang;
-    }
-
     const flag = await this.store.getFlag(session.flag_id);
-    if (flag?.status === "no_response") await this.store.setFlagStatus(flag.id, "awaiting");
 
     if (!turn.done) {
-      await this.store.saveSession(session);
-      return this.send(farmer, [turn.prompt]);
+      if (!(await this.store.saveSession(session))) return null;
+      await this.afterSave(farmer, turn.session.lang, flag);
+      return [turn.prompt];
     }
 
     const report = score(session.state.disease, session.state.answers, { leafWetHours: flag?.details.leaf_wet_hours ?? undefined });
@@ -104,13 +141,23 @@ export class Conversations {
     session.completed_at = at;
     session.report = report;
     session.recheck_due_at = report.recheckInDays ? new Date(this.now().getTime() + report.recheckInDays * DAY_MS).toISOString() : null;
-    await this.store.saveSession(session);
+    if (!(await this.store.saveSession(session))) return null;
+    await this.afterSave(farmer, turn.session.lang, flag);
     if (flag) await this.store.setFlagStatus(flag.id, "answered");
 
     const replies: Outgoing[] = [turn.prompt];
     const next = await this.store.nextQueued(farmer.id);
     if (next) replies.push(...(await this.begin(farmer, next)));
-    return this.send(farmer, replies);
+    return replies;
+  }
+
+  /** Remember a newly picked language, and lift "no response" once the farmer answers. */
+  private async afterSave(farmer: Farmer, lang: Farmer["lang"], flag: Flag | null): Promise<void> {
+    if (lang && !farmer.lang) {
+      await this.store.setLang(farmer.id, lang);
+      farmer.lang = lang;
+    }
+    if (flag?.status === "no_response") await this.store.setFlagStatus(flag.id, "awaiting");
   }
 
   /** Reminders, no-response marks and re-asks that have come due. */
@@ -120,11 +167,15 @@ export class Conversations {
     let noResponse = 0;
     let rechecks = 0;
 
-    for (const session of await this.store.needingReminder(new Date(now.getTime() - REMIND_AFTER_MS).toISOString())) {
+    // Four hours is the soonest any reminder can be due; reminderDueAt decides.
+    for (const session of await this.store.needingReminder(new Date(now.getTime() - 4 * HOUR_MS).toISOString())) {
       const farmer = await this.store.getFarmer(session.farmer_id);
-      if (!farmer) continue;
+      if (!farmer || !session.last_activity_at) continue;
+      const lastInbound = farmer.channel === "whatsapp" ? await this.store.lastInboundAt(farmer.id) : null;
+      if (now.getTime() < reminderDueAt(farmer.channel, session.last_activity_at, lastInbound)) continue;
       session.reminded_at = now.toISOString();
-      await this.store.saveSession(session);
+      // A farmer who replied a moment ago doesn't need the reminder.
+      if (!(await this.store.saveSession(session))) continue;
       await this.outbox.send(farmer, [reminderText(farmer.crop, farmer.lang), render(session.state)]);
       reminded++;
     }
@@ -137,7 +188,7 @@ export class Conversations {
 
     for (const session of await this.store.rechecksDue(now.toISOString())) {
       session.recheck_due_at = null;
-      await this.store.saveSession(session);
+      if (!(await this.store.saveSession(session))) continue;
       const farmer = await this.store.getFarmer(session.farmer_id);
       const flag = await this.store.getFlag(session.flag_id);
       if (!farmer || !flag) continue;

@@ -28,6 +28,10 @@ class Statement {
   }
 
   async run() {
+    return this.runNow();
+  }
+
+  runNow() {
     const result = this.db.prepare(this.sql).run(...this.params);
     return { meta: { changes: Number(result.changes) } };
   }
@@ -39,12 +43,13 @@ export function testDb(): D1Database {
   for (const file of readdirSync(dir).sort()) db.exec(readFileSync(join(dir, file), "utf8"));
   return {
     prepare: (sql: string) => new Statement(db, sql),
-    // D1 runs a batch as one transaction.
+    // D1 runs a batch as one transaction, with nothing else in between, so
+    // this runs it without awaiting.
     async batch(statements: Statement[]) {
       db.exec("BEGIN");
       try {
         const results = [];
-        for (const statement of statements) results.push(await statement.run());
+        for (const statement of statements) results.push(statement.runNow());
         db.exec("COMMIT");
         return results;
       } catch (err) {

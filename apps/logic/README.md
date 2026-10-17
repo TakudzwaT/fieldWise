@@ -68,7 +68,8 @@ in past seasons" means an infested field (rotation and liming, not a spray).
    one questionnaire at a time; the next starts when they finish.
 3. Each reply moves the questionnaire on. The last answer is scored, and the
    report is stored on the session.
-4. A farmer silent for 24 hours gets one reminder. 24 hours after that the flag
+4. A farmer silent for 24 hours (about 20 on WhatsApp, see below) gets one
+   reminder. 24 hours after that the flag
    shows as `no_response`, so a silent farm doesn't look healthy. A late reply
    still counts. A black rot questionnaire that comes back clear is sent again
    7 days later.
@@ -88,6 +89,18 @@ Setup, step by step: [docs/whatsapp-setup.md](docs/whatsapp-setup.md).
 - A greeting (`hi`, `moni`), a voice note or photo, or a template's **Start**
   button shows the current question again rather than counting as a wrong
   answer.
+- Each button carries its question's screen (`s3:1`), so a tap on an earlier
+  question's button isn't taken as the answer to the current one; the farmer
+  is shown the current question instead.
+- Two replies arriving together (two quick taps are two webhook calls) can't
+  overwrite each other: a session only saves if nobody saved it since it was
+  read, and otherwise the reply is handled again.
+- Reminders on WhatsApp go out 20 hours after the last activity, or 3 hours
+  before the farmer's 24-hour window closes if sooner, so they still arrive
+  without a template.
+- **STOP** (or `unsubscribe`, `lekani`, `siyani`) confirms, then deletes the
+  farmer and everything about them. Only on WhatsApp; the simulator's seeded
+  farmers can't be deleted this way. The welcome message says how to stop.
 - WhatsApp only allows these messages within 24 hours of the farmer's last
   message. Outside that, delivery fails with code 131047. If `WHATSAPP_TEMPLATE`
   is set, FieldWise sends that template instead, at most once a day per
@@ -226,7 +239,7 @@ curl "http://localhost:8787/__scheduled?cron=15+*+*+*+*"
 | `src/whatsapp.ts` | WhatsApp webhook, delivery, joining and the template fallback |
 | `src/phone.ts` | Phone number normalising |
 | `src/store.ts` | D1 reads and writes |
-| `migrations/` | Schema, demo farmers, and WhatsApp delivery status |
+| `migrations/` | Schema, demo farmers, WhatsApp delivery status, session versions |
 | `docs/whatsapp-setup.md` | Setting up Meta's WhatsApp test number |
 
 `src/checks.ts` imports the decision tree from `../api/src/assess.ts`, so the

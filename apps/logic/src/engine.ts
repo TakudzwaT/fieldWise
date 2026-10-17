@@ -20,6 +20,12 @@ export interface Session {
 }
 
 export interface Prompt {
+  /**
+   * Which screen this is ("lang", "s0" to "s7", "done"). WhatsApp puts it in
+   * each button, so a tap on an earlier question's button can be told apart
+   * from an answer to the current one.
+   */
+  key: string;
   header?: string;
   body: string;
   /** The replies on offer; channels show them as buttons or as "1 Yes". */
@@ -86,14 +92,21 @@ export function reply(current: Session, input: string): Turn {
   return { session, prompt: render(session), done: session.step >= STEPS, retry: false };
 }
 
+/** The key of the session's current screen; see Prompt.key. */
+export function screenKey(session: Session): string {
+  if (session.lang === null) return "lang";
+  return session.step >= STEPS ? "done" : `s${session.step}`;
+}
+
 /** The screen for the session's current step. */
 export function render(session: Session, retry = false): Prompt {
+  const key = screenKey(session);
   if (session.lang === null) {
     const body = retry ? `${MESSAGES.retry.en}\n${MESSAGES.chooseLanguage}` : MESSAGES.chooseLanguage;
-    return { body, options: [{ reply: "1", label: "English" }, { reply: "2", label: "Chichewa" }] };
+    return { key, body, options: [{ reply: "1", label: "English" }, { reply: "2", label: "Chichewa" }] };
   }
   const lang = session.lang;
-  if (session.step >= STEPS) return { body: MESSAGES.thanks[lang], options: [] };
+  if (session.step >= STEPS) return { key, body: MESSAGES.thanks[lang], options: [] };
 
   const questionnaire = QUESTIONNAIRES[session.disease];
   const index = Math.floor(session.step / 2);
@@ -103,6 +116,7 @@ export function render(session: Session, retry = false): Prompt {
   else text = (session.answers[index]!.main ? question.yes : question.no).ask[lang];
 
   return {
+    key,
     header: `${CROP_LABEL[questionnaire.crop][lang]} · ${session.step + 1} ${MESSAGES.of[lang]} ${STEPS}`,
     body: retry ? `${MESSAGES.retry[lang]}\n${text}` : text,
     options: [

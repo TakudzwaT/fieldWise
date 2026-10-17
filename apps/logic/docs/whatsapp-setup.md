@@ -183,8 +183,11 @@ The alert and the first question arrive on the phone with buttons.
 2. On the dashboard, choose a judge's farm and press **Wet spell**. Their phone
    buzzes with the alert and the language question.
 3. They tap through the eight questions. The dashboard updates as they go.
+   Tapping an old question's button by mistake just shows the current one.
 4. `/sim?farmer=<id>` mirrors any farmer's WhatsApp chat, with sent,
    delivered and read ticks, if you want it on the projector.
+
+5. Afterwards, anyone can text `STOP` to be deleted and get no more messages.
 
 If WhatsApp misbehaves, the seeded farmers on the simulator do the same flow
 with nothing outside FieldWise.

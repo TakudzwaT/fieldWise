@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { apply, runChecks, scenarioAssessment, type Assessment } from "../src/checks";
-import { Conversations } from "../src/conversation";
+import { Conversations, reminderDueAt } from "../src/conversation";
 import { Outbox } from "../src/outbox";
 import { Store, type Farmer } from "../src/store";
 import { testDb } from "./d1";
@@ -189,5 +189,64 @@ describe("demo scenario", () => {
     expect(await run("dry")).toEqual([null, null]);
     expect(await run("wet")).toEqual(["new", "new"]);
     expect((await store.listFlags("F084")).every((f) => f.source === "scenario")).toBe(true);
+  });
+});
+
+describe("replies at the same moment", () => {
+  it("counts two taps on the same button once", async () => {
+    await conversations.raise(await farmer("F056"), "late_blight", "new", "forecast", {});
+    await conversations.inbound(banda, "1");
+    const [a, b] = await Promise.all([
+      conversations.inbound(banda, "1", { screen: "s0" }),
+      conversations.inbound(banda, "1", { screen: "s0" }),
+    ]);
+    const session = await store.activeSession("F056");
+    expect(session?.state).toMatchObject({ step: 1, answers: [{ main: true }] });
+    // One tap moved on; the other was seen as an old button.
+    expect([a, b].flat().join("\n")).toContain("that button was for an earlier question");
+  });
+
+  it("counts two different typed answers arriving together, in turn", async () => {
+    await conversations.raise(await farmer("F056"), "late_blight", "new", "forecast", {});
+    await conversations.inbound(banda, "1");
+    await Promise.all([conversations.inbound(banda, "1"), conversations.inbound(banda, "2")]);
+    const session = await store.activeSession("F056");
+    expect(session?.state.step).toBe(2);
+    expect(session?.version).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe("WhatsApp reminder timing", () => {
+  const at = "2026-10-20T06:00:00.000Z";
+  const plus = (h: number) => Date.parse(at) + h * HOUR;
+  const ago = (h: number) => new Date(Date.parse(at) - h * HOUR).toISOString();
+
+  it("waits a day on the simulator", () => {
+    expect(reminderDueAt("sim", at, null)).toBe(plus(24));
+  });
+
+  it("reminds on WhatsApp while the 24-hour window is still open", () => {
+    expect(reminderDueAt("whatsapp", at, null)).toBe(plus(20));
+    expect(reminderDueAt("whatsapp", at, at)).toBe(plus(20));
+    // Last message 10 h before the alert: the window closes 14 h after it.
+    expect(reminderDueAt("whatsapp", at, ago(10))).toBe(plus(11));
+    // Window nearly closed already: no sooner than 4 h after the alert.
+    expect(reminderDueAt("whatsapp", at, ago(22))).toBe(plus(4));
+  });
+
+  it("sends the WhatsApp reminder before the window closes", async () => {
+    const judge: Farmer = {
+      id: "W1", name: "Judge", farm_name: null, phone: "+2650000000111", crop: "maize",
+      latitude: -13.03, longitude: 33.48, lang: "en", channel: "whatsapp", created_at: clock.toISOString(),
+    };
+    await store.addFarmer(judge);
+    await store.logMessage({ farmer_id: "W1", direction: "in", channel: "whatsapp", body: "join maize", at: clock.toISOString() });
+    later(6);
+    await conversations.raise(judge, "maize_leaf_blights", "new", "forecast", {});
+    // Joined 6 h before the alert, so the window closes 18 h after it: remind at 15 h.
+    later(14);
+    expect((await conversations.sweep()).reminded).toBe(0);
+    later(1);
+    expect((await conversations.sweep()).reminded).toBe(1);
   });
 });

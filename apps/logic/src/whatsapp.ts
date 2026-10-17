@@ -15,7 +15,7 @@ import { normalizePhone } from "./phone";
 import type { Deliver, Outgoing } from "./outbox";
 import { NAMED } from "../../api/src/cells";
 import { newId, type Conversations } from "./conversation";
-import { NOT_REGISTERED } from "./messages";
+import { NOT_REGISTERED, stoppedText } from "./messages";
 import { CROP_LABEL, type Crop } from "./questionnaires";
 import type { Farmer, Store } from "./store";
 
@@ -86,7 +86,10 @@ export function payload(to: string, message: Outgoing): Record<string, unknown> 
       ...(prompt.header ? { header: { type: "text", text: clip(prompt.header, HEADER_MAX) } } : {}),
       body: { text: clip(prompt.body, BODY_MAX) },
       action: {
-        buttons: prompt.options.map((o) => ({ type: "reply", reply: { id: o.reply, title: clip(o.label, BUTTON_TITLE_MAX) } })),
+        buttons: prompt.options.map((o) => ({
+          type: "reply",
+          reply: { id: `${prompt.key}:${o.reply}`, title: clip(o.label, BUTTON_TITLE_MAX) },
+        })),
       },
     },
   };
@@ -203,6 +206,8 @@ export interface Inbound {
   phone: string;
   text: string;
   name: string | null;
+  /** For a button tap: the screen the button belonged to (see Prompt.key). */
+  screen?: string;
 }
 
 export interface Receipt {
@@ -237,7 +242,14 @@ export function parseWebhook(body: unknown): { messages: Inbound[]; receipts: Re
                 : null;
         // Voice notes, photos and the like still count as the farmer getting in
         // touch; they get the current screen again.
-        messages.push({ id: String(m.id), phone, text: typeof text === "string" ? text : "", name: names.get(String(m.from)) ?? null });
+        const message: Inbound = { id: String(m.id), phone, text: typeof text === "string" ? text : "", name: names.get(String(m.from)) ?? null };
+        // Our buttons' ids are "<screen>:<reply>", e.g. "s3:1".
+        const tagged = m.type === "interactive" ? /^(lang|s\d+):(\d)$/.exec(message.text) : null;
+        if (tagged) {
+          message.screen = tagged[1];
+          message.text = tagged[2];
+        }
+        messages.push(message);
       }
       for (const s of value.statuses ?? []) {
         if (!s.id || !["sent", "delivered", "read", "failed"].includes(s.status)) continue;
@@ -278,12 +290,35 @@ export async function processWebhook({ messages, receipts }: ReturnType<typeof p
   for (const message of messages) {
     // Meta retries webhooks; each message is handled once.
     if (!(await store.markSeen(message.id, now().toISOString()))) continue;
-    if (await store.getFarmerByPhone(message.phone)) {
-      await conversations.inbound(message.phone, message.text);
+    const farmer = await store.getFarmerByPhone(message.phone);
+    if (farmer && isStop(message.text)) {
+      await stop(farmer, deps, fetchFn);
+      continue;
+    }
+    if (farmer) {
+      await conversations.inbound(message.phone, message.text, { screen: message.screen });
       continue;
     }
     await stranger(message, deps, fetchFn);
   }
+}
+
+const STOP_WORDS = new Set(["stop", "unsubscribe", "stopall", "lekani", "siyani"]);
+
+export function isStop(text: string): boolean {
+  return STOP_WORDS.has(text.trim().toLowerCase().replace(/[^\p{L}]+/gu, ""));
+}
+
+/**
+ * STOP: confirm, then delete the farmer and everything about them. Only on
+ * WhatsApp; the simulator's seeded farmers can't be deleted this way.
+ */
+async function stop(farmer: Farmer, { store, config }: WebhookDeps, fetchFn: typeof fetch): Promise<void> {
+  if (config) {
+    await post(config, payload(farmer.phone, stoppedText(farmer.lang)), fetchFn).catch((err) => console.error("STOP reply failed", err));
+  }
+  await store.deleteFarmer(farmer.id);
+  console.log(`Farmer ${farmer.id} sent STOP and was deleted`);
 }
 
 /** A message from a number that isn't registered: join, or say how to. */
@@ -362,9 +397,9 @@ export const JOIN_HELP =
 
 export const joinedText = (name: string, crop: Crop) =>
   `FieldWise: welcome, ${name}. You are registered with ${cropWord(crop)} near Kasungu. ` +
-  "We will message you when the weather puts your crop at risk.\n\n" +
+  "We will message you when the weather puts your crop at risk. Text STOP at any time to stop.\n\n" +
   `FieldWise: takulandirani, ${name}. Mwalembetsedwa ndi ${CROP_LABEL[crop].ny.toLowerCase()} pafupi ndi Kasungu. ` +
-  "Tidzakutumizirani uthenga nyengo ikaika mbewu zanu pachiopsezo.";
+  "Tidzakutumizirani uthenga nyengo ikaika mbewu zanu pachiopsezo. Tumizani STOP nthawi iliyonse kuti musiye.";
 
 /** "tomatoes", "maize", "beans", "cabbages". */
 function cropWord(crop: Crop): string {

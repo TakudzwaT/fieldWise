@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { start } from "../src/engine";
 import worker, { type Env } from "../src/index";
-import { parseJoin, parseWebhook, payload, validSignature, verifySubscription } from "../src/whatsapp";
+import { isStop, parseJoin, parseWebhook, payload, validSignature, verifySubscription } from "../src/whatsapp";
 import { testDb } from "./d1";
 
 const SECRET = "app-secret";
@@ -98,8 +98,8 @@ describe("message format", () => {
         body: { text: "Do any leaves have brown or black patches that look wet?" },
         action: {
           buttons: [
-            { type: "reply", reply: { id: "1", title: "Yes" } },
-            { type: "reply", reply: { id: "2", title: "No" } },
+            { type: "reply", reply: { id: "s0:1", title: "Yes" } },
+            { type: "reply", reply: { id: "s0:2", title: "No" } },
           ],
         },
       },
@@ -109,7 +109,10 @@ describe("message format", () => {
   it("sends the language choice as buttons with no header, and plain messages as text", () => {
     const language = payload("+265991234567", start("late_blight").prompt) as any;
     expect(language.interactive.header).toBeUndefined();
-    expect(language.interactive.action.buttons.map((b: any) => b.reply.title)).toEqual(["English", "Chichewa"]);
+    expect(language.interactive.action.buttons.map((b: any) => [b.reply.id, b.reply.title])).toEqual([
+      ["lang:1", "English"],
+      ["lang:2", "Chichewa"],
+    ]);
     expect(payload("+265991234567", "Hello")).toMatchObject({ type: "text", text: { body: "Hello", preview_url: false } });
   });
 });
@@ -272,5 +275,64 @@ describe("delivery receipts and the 24-hour window", () => {
     await admin(unconfigured, "POST", "/flags", { farmer_id: judge.id, disease: "late_blight" });
     const { messages } = await admin(unconfigured, "GET", `/farmers/${judge.id}/messages`);
     expect(messages.at(-1)).toMatchObject({ status: "failed", error: "whatsapp is not configured" });
+  });
+});
+
+describe("taps on old buttons", () => {
+  it("re-shows the current question instead of taking an old button as its answer", async () => {
+    const e = env();
+    await postWebhook(e, webhook({ messages: [textMessage("join maize")] }));
+    const { farmers } = await admin(e, "GET", "/farmers");
+    const judge = farmers.find((f: any) => f.channel === "whatsapp");
+    await admin(e, "POST", "/flags", { farmer_id: judge.id, disease: "maize_leaf_blights" });
+    await postWebhook(e, webhook({ messages: [buttonTap("lang:1")] })); // English
+    await postWebhook(e, webhook({ messages: [buttonTap("s0:1")] })); // Q1 yes
+    expect(sent.at(-1).interactive.header.text).toBe("Your maize · 2 of 8");
+
+    // Scrolls up and taps "No" on question 1 again.
+    await postWebhook(e, webhook({ messages: [buttonTap("s0:2")] }));
+    expect(sent.at(-2).text.body).toBe("FieldWise: that button was for an earlier question. Here is the current one.");
+    expect(sent.at(-1).interactive.header.text).toBe("Your maize · 2 of 8");
+
+    const { flags } = await admin(e, "GET", `/farmers/${judge.id}`);
+    expect(flags[0].session).toMatchObject({ step: 1, answers: [{ main: true }] });
+  });
+
+  it("reads the screen out of a button id", () => {
+    const [m] = parseWebhook(webhook({ messages: [buttonTap("s3:2")] })).messages;
+    expect(m).toMatchObject({ text: "2", screen: "s3" });
+    const [typed] = parseWebhook(webhook({ messages: [textMessage("s3:2")] })).messages;
+    expect(typed).toMatchObject({ text: "s3:2" });
+    expect(typed.screen).toBeUndefined();
+  });
+});
+
+describe("STOP", () => {
+  it("confirms, then deletes the farmer and everything about them", async () => {
+    const e = env();
+    await postWebhook(e, webhook({ messages: [textMessage("join beans")] }));
+    expect(sent.at(-1).text.body).toContain("Text STOP at any time to stop.");
+    const judge = (await admin(e, "GET", "/farmers")).farmers.find((f: any) => f.channel === "whatsapp");
+    await admin(e, "POST", "/flags", { farmer_id: judge.id, disease: "bean_leaf_diseases" });
+
+    await postWebhook(e, webhook({ messages: [textMessage("STOP")] }));
+    expect(sent.at(-1).text.body).toContain("you will get no more messages, and your details have been deleted");
+    expect((await admin(e, "GET", "/farmers")).farmers.some((f: any) => f.id === judge.id)).toBe(false);
+    expect((await admin(e, "GET", "/flags")).flags).toEqual([]);
+
+    // A later message is from a stranger again.
+    await postWebhook(e, webhook({ messages: [textMessage("hello")] }));
+    expect(sent.at(-1).text.body).toMatch(/to join, reply JOIN/);
+  });
+
+  it("knows STOP in English and Chichewa, and nothing else", () => {
+    for (const word of ["STOP", "stop.", "Unsubscribe", "lekani", "Siyani!"]) expect(isStop(word)).toBe(true);
+    for (const word of ["stopped", "don't stop", "2", ""]) expect(isStop(word)).toBe(false);
+  });
+
+  it("doesn't delete simulator farmers", async () => {
+    const e = env();
+    await admin(e, "POST", "/inbound", { phone: "+2650000000056", text: "stop" });
+    expect((await admin(e, "GET", "/farmers")).farmers).toHaveLength(8);
   });
 });

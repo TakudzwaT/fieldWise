@@ -38,6 +38,16 @@ const NO_QUESTIONS: Text = {
   ny: "FieldWise: palibe mafunso pano. Tidzakutumizirani uthenga mbewu zanu zikafunika kuyang'aniridwa.",
 };
 
+const STALE: Text = {
+  en: "FieldWise: that button was for an earlier question. Here is the current one.",
+  ny: "FieldWise: batani limenelo linali la funso lakale. Nali funso la tsopano.",
+};
+
+const STOPPED: Text = {
+  en: "FieldWise: you will get no more messages, and your details have been deleted. To come back, text JOIN and your crop.",
+  ny: "FieldWise: simudzalandiranso mauthenga, ndipo zambiri zanu zachotsedwa. Kuti mubwerere, tumizani JOIN ndi mbewu yanu.",
+};
+
 export const NOT_REGISTERED =
   "FieldWise: this number is not registered. Ask your extension officer to add you.\n\n" +
   "FieldWise: nambala iyi sinalembetsedwe. Funsani mlangizi wanu wa zaulimi kuti akulembetseni.";
@@ -61,3 +71,7 @@ export const nudgeText = (crop: Crop, lang: Lang | null) => say((l) => NUDGE(cro
 export const reminderText = (crop: Crop, lang: Lang | null) => say((l) => REMINDER(cropInSentence(crop, l))[l], lang);
 
 export const noQuestionsText = (lang: Lang | null) => say((l) => NO_QUESTIONS[l], lang);
+
+export const staleText = (lang: Lang | null) => say((l) => STALE[l], lang);
+
+export const stoppedText = (lang: Lang | null) => say((l) => STOPPED[l], lang);

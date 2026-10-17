@@ -60,6 +60,8 @@ export interface StoredSession {
   completed_at: string | null;
   report: Report | null;
   recheck_due_at: string | null;
+  /** Bumped on every save; see saveSession. */
+  version: number;
 }
 
 export type DeliveryStatus = "sent" | "delivered" | "read" | "failed";
@@ -211,7 +213,7 @@ export class Store {
            s.id AS s_id, s.flag_id AS s_flag_id, s.farmer_id AS s_farmer_id, s.status AS s_status, s.state AS s_state,
            s.created_at AS s_created_at, s.started_at AS s_started_at, s.last_activity_at AS s_last_activity_at,
            s.reminded_at AS s_reminded_at, s.completed_at AS s_completed_at, s.report AS s_report,
-           s.recheck_due_at AS s_recheck_due_at,
+           s.recheck_due_at AS s_recheck_due_at, s.version AS s_version,
            fa.name AS fa_name, fa.farm_name AS fa_farm_name, fa.crop AS fa_crop
          FROM flags f
          JOIN farmers fa ON fa.id = f.farmer_id
@@ -248,22 +250,30 @@ export class Store {
     return this.db
       .prepare(
         `INSERT INTO sessions (id, flag_id, farmer_id, status, state, created_at, started_at, last_activity_at,
-           reminded_at, completed_at, report, recheck_due_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           reminded_at, completed_at, report, recheck_due_at, version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .bind(...sessionValues(session));
+      .bind(...sessionValues(session), session.version);
   }
 
-  async saveSession(session: StoredSession): Promise<void> {
+  /**
+   * Save a session if nobody else has saved it since it was read. Returns false
+   * (and saves nothing) when another reply got there first; the caller should
+   * read it again and redo its change.
+   */
+  async saveSession(session: StoredSession): Promise<boolean> {
     const [id, ...rest] = sessionValues(session);
-    await this.db
+    const result = await this.db
       .prepare(
         `UPDATE sessions SET flag_id = ?, farmer_id = ?, status = ?, state = ?, created_at = ?, started_at = ?,
-           last_activity_at = ?, reminded_at = ?, completed_at = ?, report = ?, recheck_due_at = ?
-         WHERE id = ?`,
+           last_activity_at = ?, reminded_at = ?, completed_at = ?, report = ?, recheck_due_at = ?, version = version + 1
+         WHERE id = ? AND version = ?`,
       )
-      .bind(...rest, id)
+      .bind(...rest, id, session.version)
       .run();
+    if (result.meta.changes === 0) return false;
+    session.version++;
+    return true;
   }
 
   async getSessionByFlag(flagId: string): Promise<StoredSession | null> {
@@ -299,7 +309,7 @@ export class Store {
     return row ? toSession(row) : null;
   }
 
-  /** Active sessions with no reply since `before` and no reminder yet. */
+  /** Active sessions with no activity since `before` and no reminder yet. */
   async needingReminder(before: string): Promise<StoredSession[]> {
     const { results } = await this.db
       .prepare("SELECT * FROM sessions WHERE status = 'active' AND reminded_at IS NULL AND last_activity_at <= ?")
@@ -373,6 +383,24 @@ export class Store {
       .prepare("SELECT * FROM messages WHERE farmer_id = ? AND direction = 'out' AND body LIKE ? AND at >= ? ORDER BY id DESC LIMIT 1")
       .bind(farmerId, `${prefix}%`, since)
       .first<Message>();
+  }
+
+  /** When the farmer last messaged FieldWise, or null if never. */
+  async lastInboundAt(farmerId: string): Promise<string | null> {
+    const row = await this.db
+      .prepare("SELECT at FROM messages WHERE farmer_id = ? AND direction = 'in' ORDER BY id DESC LIMIT 1")
+      .bind(farmerId)
+      .first<{ at: string }>();
+    return row?.at ?? null;
+  }
+
+  /** Delete a farmer and everything about them. For STOP. */
+  async deleteFarmer(farmerId: string): Promise<void> {
+    await this.db.batch(
+      ["messages", "sessions", "flags", "tracks"]
+        .map((table) => this.db.prepare(`DELETE FROM ${table} WHERE farmer_id = ?`).bind(farmerId))
+        .concat(this.db.prepare("DELETE FROM farmers WHERE id = ?").bind(farmerId)),
+    );
   }
 
   /** True the first time an inbound WhatsApp message id is seen. */
