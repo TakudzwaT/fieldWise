@@ -9,7 +9,9 @@
     "crons": ["15 * * * *"]
   },
   "vars": {
-    "WEATHER_API": "https://fieldwise-api.takudzwamhizha132.workers.dev"
+    "WEATHER_API": "https://fieldwise-api.takudzwamhizha132.workers.dev",
+    // No token needed for the made-up demo farmers; see src/index.ts.
+    "OPEN_DEMO": "true"
   },
   "d1_databases": [
     {

@@ -163,12 +163,13 @@ export class Store {
 
   // Farmers
 
-  /** Every farmer, or only one officer's. */
-  async listFarmers(officerId?: string): Promise<Farmer[]> {
-    const statement = officerId
-      ? this.db.prepare("SELECT * FROM farmers WHERE officer_id = ? ORDER BY id").bind(officerId)
-      : this.db.prepare("SELECT * FROM farmers ORDER BY id");
-    const { results } = await statement.all<Farmer>();
+  /** Every farmer, or only one officer's, or only the demo farmers. */
+  async listFarmers(officerId?: string, demoOnly = false): Promise<Farmer[]> {
+    const where = [officerId ? "officer_id = ?" : null, demoOnly ? "demo = 1" : null].filter(Boolean);
+    const { results } = await this.db
+      .prepare(`SELECT * FROM farmers ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY id`)
+      .bind(...(officerId ? [officerId] : []))
+      .all<Farmer>();
     return results;
   }
 
@@ -275,7 +276,7 @@ export class Store {
    * Flags with their session and farmer, newest first, in one query. D1's
    * free plan allows 50 queries per request, so lists never query per row.
    */
-  async flagRows(filter: { farmerId?: string; since?: string; officerId?: string } = {}): Promise<FlagRow[]> {
+  async flagRows(filter: { farmerId?: string; since?: string; officerId?: string; demoOnly?: boolean } = {}): Promise<FlagRow[]> {
     const where: string[] = [];
     const params: string[] = [];
     if (filter.farmerId) {
@@ -290,6 +291,7 @@ export class Store {
       where.push("fa.officer_id = ?");
       params.push(filter.officerId);
     }
+    if (filter.demoOnly) where.push("fa.demo = 1");
     const { results } = await this.db
       .prepare(
         `SELECT f.*,
@@ -617,12 +619,12 @@ export class Store {
   }
 
   /** Open call-back requests with their farmer, oldest first. */
-  async openCallbacks(officerId?: string): Promise<(Callback & { farmer: Pick<Farmer, "id" | "name" | "farm_name" | "phone"> })[]> {
+  async openCallbacks(officerId?: string, demoOnly = false): Promise<(Callback & { farmer: Pick<Farmer, "id" | "name" | "farm_name" | "phone"> })[]> {
     const { results } = await this.db
       .prepare(
         `SELECT c.*, f.name AS f_name, f.farm_name AS f_farm_name, f.phone AS f_phone FROM callbacks c
          JOIN farmers f ON f.id = c.farmer_id
-         WHERE c.done_at IS NULL ${officerId ? "AND f.officer_id = ?" : ""} ORDER BY c.requested_at`,
+         WHERE c.done_at IS NULL ${officerId ? "AND f.officer_id = ?" : ""} ${demoOnly ? "AND f.demo = 1" : ""} ORDER BY c.requested_at`,
       )
       .bind(...(officerId ? [officerId] : []))
       .all<Callback & { f_name: string; f_farm_name: string | null; f_phone: string }>();

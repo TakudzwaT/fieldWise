@@ -9,7 +9,8 @@
 // and phone numbers: the admin token for everything, or an officer's token
 // for that officer's own farmers (the Felix app). /health and the pages
 // (/demo, /dashboard, /sim, /phone, /officer) are open; the pages ask for the
-// admin token.
+// admin token, unless OPEN_DEMO is "true": then a request with no token may
+// see and run the demo farmers only (made-up farmers, demo = 1).
 
 import { inBounds } from "../../api/src/cells";
 import { apply, runChecks, scenarioAssessment, weatherApi, type ScenarioWeather } from "./checks";
@@ -45,6 +46,8 @@ export interface Env extends WhatsAppEnv, SmsEnv {
   ADMIN_TOKEN?: string;
   /** Africa's Talking calls /ussd?key=<USSD_KEY>; it doesn't sign its requests. */
   USSD_KEY?: string;
+  /** "true": no token needed for the demo farmers (made-up, demo = 1). */
+  OPEN_DEMO?: string;
 }
 
 interface App {
@@ -55,8 +58,11 @@ interface App {
   whatsapp: ReturnType<typeof whatsappConfig>;
 }
 
-/** Who is calling: the admin (everything), or an officer (their own farmers). */
-type Principal = { kind: "admin" } | { kind: "officer"; officer: Officer };
+/**
+ * Who is calling: the admin (everything), an officer (their own farmers), or,
+ * with OPEN_DEMO, anyone without a token (the demo farmers only).
+ */
+type Principal = { kind: "admin" } | { kind: "officer"; officer: Officer } | { kind: "demo" };
 
 function app(env: Env, now: () => Date = () => new Date(), fetchFn: typeof fetch = fetch): App {
   const store = new Store(env.DB);
@@ -122,13 +128,17 @@ async function route(request: Request, url: URL, env: Env, { store, conversation
   const method = request.method;
   // An officer sees only their own farmers; the admin sees everyone.
   const scope = who.kind === "officer" ? who.officer.id : undefined;
-  const mine = (farmer: Farmer | null) => (farmer && (!scope || farmer.officer_id === scope) ? farmer : null);
+  // Without a token (OPEN_DEMO), only the made-up demo farmers.
+  const demo = who.kind === "demo";
+  const mine = (farmer: Farmer | null) => (farmer && (!scope || farmer.officer_id === scope) && (!demo || farmer.demo) ? farmer : null);
 
-  if (url.pathname === "/me" && method === "GET") return json(who.kind === "officer" ? { role: "officer", officer: who.officer } : { role: "admin" });
+  if (url.pathname === "/me" && method === "GET") {
+    return json(who.kind === "officer" ? { role: "officer", officer: who.officer } : { role: who.kind });
+  }
 
   if (parts[0] === "farmers") {
-    if (parts.length === 1 && method === "GET") return json({ farmers: await store.listFarmers(scope) });
-    if (parts.length === 1 && method === "POST") return scope ? forbidden() : addFarmer(request, store, now);
+    if (parts.length === 1 && method === "GET") return json({ farmers: await store.listFarmers(scope, demo) });
+    if (parts.length === 1 && method === "POST") return scope || demo ? forbidden() : addFarmer(request, store, now);
     const farmer = mine(parts[1] ? await store.getFarmer(parts[1]) : null);
     if (!farmer) return error(404, "No farmer with that id.");
     if (parts.length === 2 && method === "GET") return json({ farmer, flags: flagsView(await store.flagRows({ farmerId: farmer.id })) });
@@ -143,35 +153,35 @@ async function route(request: Request, url: URL, env: Env, { store, conversation
     }
   }
 
-  if (url.pathname === "/flags" && method === "GET") return json({ flags: flagsView(await store.flagRows({ officerId: scope })) });
+  if (url.pathname === "/flags" && method === "GET") return json({ flags: flagsView(await store.flagRows({ officerId: scope, demoOnly: demo })) });
 
   if (parts[0] === "felix" && parts.length === 2 && method === "GET" && (parts[1] === "priority" || parts[1] === "summary")) {
     const days = url.searchParams.has("days") ? Number(url.searchParams.get("days")) : 14;
     if (!Number.isInteger(days) || days < 1 || days > 90) return error(400, "days must be a whole number from 1 to 90.");
-    const rows = await store.flagRows({ since: new Date(now().getTime() - days * 86_400_000).toISOString(), officerId: scope });
+    const rows = await store.flagRows({ since: new Date(now().getTime() - days * 86_400_000).toISOString(), officerId: scope, demoOnly: demo });
     if (parts[1] === "priority") {
-      return json({ days, generated_at: now().toISOString(), farms: priorityList(rows), callbacks: await store.openCallbacks(scope) });
+      return json({ days, generated_at: now().toISOString(), farms: priorityList(rows), callbacks: await store.openCallbacks(scope, demo) });
     }
-    return json({ days, generated_at: now().toISOString(), ...summary(rows, (await store.listFarmers(scope)).length) });
+    return json({ days, generated_at: now().toISOString(), ...summary(rows, (await store.listFarmers(scope, demo)).length) });
   }
 
   if (url.pathname === "/felix/advice" && method === "GET") {
     return json({ advice: Object.entries(ADVICE).map(([id, a]) => ({ id, label: a.label, text: a.text })) });
   }
 
-  if (url.pathname === "/felix/callbacks" && method === "GET") return json({ callbacks: await store.openCallbacks(scope) });
+  if (url.pathname === "/felix/callbacks" && method === "GET") return json({ callbacks: await store.openCallbacks(scope, demo) });
 
   if (parts[0] === "felix" && parts[1] === "callbacks" && parts.length === 4 && parts[3] === "done" && method === "POST") {
     const callback = await store.getCallback(parts[2]);
     if (!callback || !mine(await store.getFarmer(callback.farmer_id))) return error(404, "No call-back request with that id.");
-    const closed = await store.closeCallback(callback.id, now().toISOString(), scope ?? "admin");
+    const closed = await store.closeCallback(callback.id, now().toISOString(), scope ?? (demo ? "demo" : "admin"));
     return json({ done: true, already: !closed });
   }
 
   if (url.pathname === "/felix/broadcast" && method === "POST") {
     const body = await readJson(request);
     if (body instanceof Response) return body;
-    let farmers = await store.listFarmers(scope);
+    let farmers = await store.listFarmers(scope, demo);
     if (body.farmer_ids !== undefined) {
       if (!Array.isArray(body.farmer_ids) || !body.farmer_ids.every((id) => typeof id === "string")) return error(400, "farmer_ids must be a list of ids.");
       const ids = new Set(body.farmer_ids as string[]);
@@ -190,7 +200,7 @@ async function route(request: Request, url: URL, env: Env, { store, conversation
   }
 
   if (parts[0] === "officers") {
-    if (scope) return forbidden();
+    if (scope || demo) return forbidden();
     if (parts.length === 1 && method === "GET") return json({ officers: await store.listOfficers() });
     if (parts.length === 1 && method === "POST") return addOfficer(request, store, now);
     if (parts.length === 3 && parts[2] === "token" && method === "POST") {
@@ -218,6 +228,7 @@ async function route(request: Request, url: URL, env: Env, { store, conversation
   if (scope) return forbidden();
 
   if (url.pathname === "/checks/run" && method === "POST") {
+    if (demo) return forbidden();
     const results = await runChecks(store, conversations, weatherApi(env.WEATHER_API), now());
     return json({ results });
   }
@@ -227,7 +238,7 @@ async function route(request: Request, url: URL, env: Env, { store, conversation
     if (body instanceof Response) return body;
     const weather = body.weather as ScenarioWeather;
     if (weather !== "wet" && weather !== "dry") return error(400, 'weather must be "wet" or "dry".');
-    let farmers = await store.listFarmers();
+    let farmers = await store.listFarmers(undefined, demo);
     if (body.farmer_id !== undefined) farmers = farmers.filter((f) => f.id === body.farmer_id);
     if (!farmers.length) return error(404, "No farmer with that id.");
     const results = [];
@@ -241,6 +252,8 @@ async function route(request: Request, url: URL, env: Env, { store, conversation
     const body = await readJson(request);
     if (body instanceof Response) return body;
     if (body.confirm !== "reset") return error(400, 'This deletes every flag, answer and message. Send {"confirm": "reset"}.');
+    // A reset clears everyone; without a token, only while every farmer is a demo farmer.
+    if (demo && (await store.listFarmers()).some((f) => !f.demo)) return forbidden();
     await store.resetActivity();
     return json({ reset: true });
   }
@@ -250,6 +263,7 @@ async function route(request: Request, url: URL, env: Env, { store, conversation
     if (body instanceof Response) return body;
     const phone = typeof body.phone === "string" ? normalizePhone(body.phone) : null;
     if (!phone || typeof body.text !== "string") return error(400, "Pass phone and text.");
+    if (demo && !(await store.getFarmerByPhone(phone))?.demo) return forbidden();
     // A button tap from the simulator says which screen its button was on.
     const screen = typeof body.screen === "string" && /^(lang|ward|pick|more|s\d)$/.test(body.screen) ? body.screen : undefined;
     return json({ replies: await conversations.inbound(phone, body.text, { screen }) });
@@ -291,7 +305,9 @@ async function ussdRoute(request: Request, url: URL, env: Env): Promise<Response
   const key = url.searchParams.get("key");
   const byGateway = !!env.USSD_KEY && key !== null && constantTimeEqual(key, env.USSD_KEY);
   const byAdmin = !!env.ADMIN_TOKEN && constantTimeEqual(bearer(request), env.ADMIN_TOKEN);
-  if (!byGateway && !byAdmin) return error(401, "Missing or wrong key.");
+  // The open demo's keypad phone: no token, and only for a demo farmer (checked below).
+  const byDemo = env.OPEN_DEMO === "true" && !bearer(request);
+  if (!byGateway && !byAdmin && !byDemo) return error(401, "Missing or wrong key.");
   let fields: Record<string, unknown>;
   try {
     fields = (request.headers.get("Content-Type") ?? "").includes("application/json")
@@ -304,6 +320,10 @@ async function ussdRoute(request: Request, url: URL, env: Env): Promise<Response
   if (!ussd) return error(400, "Pass sessionId, phoneNumber and text.");
   try {
     const { store, conversations, now } = app(env);
+    if (!byGateway && !byAdmin) {
+      const phone = normalizePhone(ussd.phoneNumber);
+      if (!phone || !(await store.getFarmerByPhone(phone))?.demo) return error(401, "Missing or wrong key.");
+    }
     const reply = await handleUssd(ussd, { store, conversations, now });
     return new Response(reply, { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", ...corsHeaders() } });
   } catch (err) {
@@ -415,6 +435,7 @@ async function principal(request: Request, env: Env, store: Store): Promise<Prin
   const given = bearer(request);
   // No admin token configured means no admin access, not open access.
   if (env.ADMIN_TOKEN && constantTimeEqual(given, env.ADMIN_TOKEN)) return { kind: "admin" };
+  if (!given && env.OPEN_DEMO === "true") return { kind: "demo" };
   if (!given.startsWith("fw_")) return null;
   const officer = await store.officerByTokenHash(await sha256(given));
   return officer ? { kind: "officer", officer } : null;

@@ -80,6 +80,14 @@ function readToken() {
 }
 function gate(onReady) {
   if (readToken()) return onReady();
+  // An open demo (OPEN_DEMO on the Worker) needs no token.
+  fetch("/me").then(function (r) {
+    if (!r.ok) throw new Error("closed");
+    token = "";
+    onReady();
+  }).catch(function () { askToken(onReady); });
+}
+function askToken(onReady) {
   var input = el("input", { type: "password", placeholder: "Admin token", autocomplete: "off", required: true });
   var form = el("form", {},
     el("div", { class: "brand" }, el("i"), "FieldWise"),
@@ -102,11 +110,13 @@ function forgetToken() {
   try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
   location.reload();
 }
+/** The Authorization header, when there is a token. */
+function auth() { return token ? { Authorization: "Bearer " + token } : {}; }
 function api(path, body) {
-  var opts = { method: body === undefined ? "GET" : "POST", headers: { Authorization: "Bearer " + token } };
+  var opts = { method: body === undefined ? "GET" : "POST", headers: auth() };
   if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
   return fetch(path, opts).then(function (r) {
-    if (r.status === 401) { forgetToken(); throw new Error("Wrong admin token"); }
+    if (r.status === 401 && token) { forgetToken(); throw new Error("Wrong admin token"); }
     return r.json().then(function (data) {
       if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
       return data;
@@ -620,10 +630,10 @@ function ussd(text) {
   var started = Date.now();
   fetch("/ussd", {
     method: "POST",
-    headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    headers: Object.assign({ "Content-Type": "application/json" }, auth()),
     body: JSON.stringify({ sessionId: session, serviceCode: CODE, phoneNumber: current.phone, text: text })
   }).then(function (r) {
-    if (r.status === 401) { forgetToken(); throw new Error("Wrong admin token"); }
+    if (r.status === 401 && token) { forgetToken(); throw new Error("Wrong admin token"); }
     return r.text();
   }).then(function (reply) {
     setTimeout(function () {

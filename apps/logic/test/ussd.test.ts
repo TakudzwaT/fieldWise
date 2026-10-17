@@ -392,3 +392,52 @@ describe("pushed sessions and the ward", () => {
     expect((await sms("F014"))[0]).toMatchObject({ status: "failed", error: "SMS is not configured" });
   });
 });
+
+describe("the open demo (OPEN_DEMO)", () => {
+  const TOKEN = "test-token";
+  const env = (): Env => ({ DB: testDb(), WEATHER_API: "https://weather.invalid", ADMIN_TOKEN: TOKEN, OPEN_DEMO: "true" });
+  const call = async (e: Env, method: string, path: string, body?: unknown, token: string | null = null) => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const response = await worker.fetch(
+      new Request(`https://logic.test${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }),
+      e,
+    );
+    return { status: response.status, text: await response.text() };
+  };
+  const json = (r: { text: string }) => JSON.parse(r.text);
+
+  it("runs the demo with no token", async () => {
+    const e = env();
+    expect(json(await call(e, "GET", "/me"))).toEqual({ role: "demo" });
+    expect(json(await call(e, "GET", "/farmers")).farmers).toHaveLength(8);
+    expect((await call(e, "POST", "/demo/reset", { confirm: "reset" })).status).toBe(200);
+    expect((await call(e, "POST", "/demo/scenario", { weather: "wet", farmer_id: "F014" })).status).toBe(200);
+    const ussd = await call(e, "POST", "/ussd", { sessionId: "s", phoneNumber: "+2650000000014", text: "" });
+    expect(ussd.text).toMatch(/^CON /);
+  });
+
+  it("keeps everything else behind the token", async () => {
+    const e = env();
+    expect((await call(e, "POST", "/officers/OFF01/token", {})).status).toBe(403);
+    expect((await call(e, "POST", "/farmers", { name: "X", phone: "0991234567", latitude: -13.05, longitude: 33.5 })).status).toBe(403);
+    expect((await call(e, "POST", "/checks/run", {})).status).toBe(403);
+    // A wrong token is still refused, not treated as no token.
+    expect((await call(e, "GET", "/farmers", undefined, "wrong")).status).toBe(401);
+    // Closed unless OPEN_DEMO is on.
+    expect((await call({ ...e, OPEN_DEMO: undefined }, "GET", "/farmers")).status).toBe(401);
+  });
+
+  it("never shows a real farmer without the token", async () => {
+    const e = env();
+    const real = json(
+      await call(e, "POST", "/farmers", { name: "Real Farmer", phone: "0991234567", latitude: -13.05, longitude: 33.5, channel: "ussd", officer_id: "OFF01" }, TOKEN),
+    ).farmer;
+    expect(json(await call(e, "GET", "/farmers")).farmers.map((f: { id: string }) => f.id)).not.toContain(real.id);
+    expect((await call(e, "GET", `/farmers/${real.id}/messages`)).status).toBe(404);
+    expect((await call(e, "POST", "/ussd", { sessionId: "r", phoneNumber: "+265991234567", text: "" })).status).toBe(401);
+    expect((await call(e, "POST", "/inbound", { phone: "+265991234567", text: "hi" })).status).toBe(403);
+    // A reset would clear the real farmer's answers too.
+    expect((await call(e, "POST", "/demo/reset", { confirm: "reset" })).status).toBe(403);
+  });
+});
