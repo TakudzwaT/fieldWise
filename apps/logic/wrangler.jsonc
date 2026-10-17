@@ -15,9 +15,8 @@
     {
       "binding": "DB",
       "database_name": "fieldwise-logic",
-      // Placeholder for local development. Replace with the id from
-      // `wrangler d1 create fieldwise-logic` on the deploy account.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      // Created with `wrangler d1 create fieldwise-logic` (region WEUR).
+      "database_id": "058d4657-a279-410b-b459-6d6b1a8a9b5e",
       "migrations_dir": "migrations"
     }
   ]

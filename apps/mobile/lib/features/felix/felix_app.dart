@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -20,6 +21,7 @@ import '../home/widgets/home_sections.dart';
 import '../home/widgets/zone_carousel.dart';
 import '../shell/almanac_scaffold.dart';
 import '../shell/bottom_nav_island.dart';
+import 'fieldwise_api.dart';
 
 /// The officer experience uses Farmable's shell and cards. Farm locations and
 /// reports are local scenario data; weather and mapped soil are refreshed when
@@ -52,7 +54,7 @@ class _Farm {
   final String id;
   final String name;
   final LatLng point;
-  final String crop;
+  String crop;
   double clay; // SoilGrids 0–5 cm estimate, percent.
   double rain; // Forecast precipitation over the next three days, mm.
   double heat; // Highest forecast temperature over the next three days, °C.
@@ -66,11 +68,35 @@ class _Farm {
   bool completed = false;
   bool planned = false;
 
+  // Set while Felix is signed in to FieldWise: the server's priority list
+  // (forecast flags scored by the farmers' own answers) replaces the local
+  // drainage and heat rules below.
+  bool live = false;
+  FieldwiseLine? line;
+  String? phone;
+
+  /// ussd (keypad phone: SMS and USSD), whatsapp, or sim (demo chat).
+  String? channel;
+
   bool get wetFlag => soilLive && clay >= 35 && rain >= 25;
   bool get dryFlag => rain < 3 && heat >= 30;
   bool get concerningReport => report == 'Concern reported';
   int get score {
     if (completed || override == 'Already checked') return 0;
+    if (live) {
+      var value = switch (line?.rank) {
+        'go_now' => 100,
+        'this_week' => 80,
+        'no_response' => 70,
+        'recheck' => 60,
+        'waiting' => 45,
+        'none' => 15,
+        _ => 10,
+      };
+      if (override == 'More urgent') value += 30;
+      if (override == 'Call instead') value -= 20;
+      return value;
+    }
     var value = wetFlag
         ? 75
         : dryFlag
@@ -87,6 +113,16 @@ class _Farm {
       ? 'Completed'
       : override == 'Call instead'
       ? 'Call today'
+      : live
+      ? switch (line?.rank) {
+          'go_now' => 'Visit today',
+          'this_week' => 'Visit this week',
+          'no_response' => 'No reply: call',
+          'recheck' => 'Re-check',
+          'waiting' => 'Waiting for farmer',
+          'none' => 'No action',
+          _ => 'Not flagged',
+        }
       : score >= 75
       ? 'Visit today'
       : score >= 55
@@ -95,6 +131,7 @@ class _Farm {
   String get action {
     if (override == 'Call instead') return 'Call farmer';
     if (override == 'Different action' && note != null) return note!;
+    if (live) return _liveAction;
     if (wetFlag) return 'Check drainage';
     if (dryFlag) return 'Check water stress';
     if (concerningReport) return 'Follow up report';
@@ -102,6 +139,7 @@ class _Farm {
   }
 
   String get why {
+    if (live) return _liveWhy;
     if (report == 'Conditions normal' && wetFlag) {
       return 'The farmer reported no standing water. Forecast rain and mapped soil still warrant a follow-up after the rain.';
     }
@@ -127,6 +165,11 @@ class _Farm {
   }
 
   String get success {
+    if (live) {
+      return line == null
+          ? 'Record the crop condition and date of the next follow-up.'
+          : 'Confirm what the farmer reported, record it, and send them advice.';
+    }
     if (wetFlag) {
       return 'Record drainage and standing water before and after the forecast rain.';
     }
@@ -135,6 +178,54 @@ class _Farm {
     }
     return 'Record the crop condition and date of the next follow-up.';
   }
+
+  String get _liveAction {
+    final l = line;
+    if (l == null) return 'Routine follow-up';
+    return switch (l.rank) {
+      'go_now' || 'this_week' =>
+        l.answersSay.isEmpty
+            ? 'Check the ${l.crop}'
+            : 'Check for ${l.answersSay.join(' and ')}',
+      'no_response' => 'Call farmer',
+      'recheck' => 'Re-check at next forecast',
+      'waiting' => "Wait for the farmer's answers",
+      _ => 'No action needed',
+    };
+  }
+
+  String get _liveWhy {
+    final l = line;
+    if (l == null) return 'The forecast does not flag this farm right now.';
+    final who = l.source == 'farmer'
+        ? 'The farmer reported a problem with their ${l.crop}.'
+        : 'The forecast flagged ${l.flagged} on the ${l.crop}.';
+    final say = l.answersSay.join(' and ');
+    final answers = switch (l.outcome) {
+      'confirmed_urgent' => 'Their answers confirm $say, and it is spreading.',
+      'confirmed' => 'Their answers confirm $say.',
+      'wrong_flag' => 'Their answers point to $say, not ${l.flagged}.',
+      'early_signs' => 'Their answers show early signs only.',
+      'clear' => 'Their answers show nothing wrong.',
+      _ =>
+        l.state == 'no_response'
+            ? 'The farmer has not answered, even after a reminder.'
+            : l.answered > 0
+            ? 'The farmer has answered ${l.answered} of 8 questions so far.'
+            : 'The farmer has not answered yet.',
+    };
+    return '$who $answers';
+  }
+}
+
+String _cap(String value) =>
+    value.isEmpty ? value : value[0].toUpperCase() + value.substring(1);
+
+String _ago(DateTime at) {
+  final minutes = DateTime.now().difference(at).inMinutes;
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return '$minutes min ago';
+  return '${minutes ~/ 60} h ago';
 }
 
 List<_Farm> _sampleFarms() => [
@@ -241,19 +332,311 @@ class _WorkspaceState extends State<_Workspace> {
   final _offlineRivers = <Polyline>[];
   String _forecastSource = 'FieldWise Kasungu forecast · 16 Oct';
 
+  // FieldWise (apps/logic): Felix's live priority list, once he signs in.
+  final _api = FieldwiseApi();
+  final _callbacks = <FieldwiseCallback>[];
+  List<FieldwiseAdvice> _advice = const [];
+  Timer? _poll;
+  bool _syncing = false;
+  DateTime? _syncedAt;
+  String? _syncError;
+
+  bool get _live => _api.signedIn;
+
   @override
   void initState() {
     super.initState();
     _loadKasunguAssets();
-    _refreshData();
+    _connect();
   }
 
   @override
   void dispose() {
+    _poll?.cancel();
     _carousel.dispose();
     _dio.close();
     super.dispose();
   }
+
+  Future<void> _connect() async {
+    await _api.restore();
+    if (!mounted) return;
+    if (_live) {
+      await _sync();
+    } else {
+      await _refreshData();
+    }
+    if (!mounted) return;
+    _poll = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (_live) _sync();
+    });
+  }
+
+  /// Reads Felix's farmers, priority list and call-backs from FieldWise.
+  Future<void> _sync() async {
+    if (_syncing) return;
+    _syncing = true;
+    try {
+      final snapshot = await _api.snapshot();
+      if (_advice.isEmpty) {
+        try {
+          _advice = await _api.advice();
+        } on FieldwiseException {
+          // Felix can still write his own message.
+        }
+      }
+      if (!mounted) return;
+      setState(() => _apply(snapshot));
+    } on FieldwiseException catch (error) {
+      if (mounted) setState(() => _syncError = error.message);
+    } finally {
+      _syncing = false;
+    }
+  }
+
+  void _apply(FieldwiseSnapshot snapshot) {
+    if (snapshot.farmers.isEmpty) {
+      _syncError = 'No farmers are assigned to you yet.';
+      return;
+    }
+    final known = {for (final farm in _farms) farm.id: farm};
+    final lines = {for (final line in snapshot.lines) line.farmerId: line};
+    final farms = <_Farm>[];
+    for (final farmer in snapshot.farmers) {
+      final farm =
+          known[farmer.id] ??
+          _Farm(
+            farmer.id,
+            farmer.farmName ?? farmer.name,
+            LatLng(farmer.latitude, farmer.longitude),
+            'Mixed crops',
+            0,
+            0,
+            0,
+          );
+      final line = lines[farmer.id];
+      final before = farm.line;
+      // Notify on what changed since the last look, not on the first load.
+      if (farm.live && line != null) {
+        if (line.rank == 'go_now' && before?.rank != 'go_now') {
+          _alerts.insert(0, '${farm.name}: visit today. ${line.label}.');
+        } else if (line.state == 'answered' && before?.state != 'answered') {
+          _alerts.insert(0, '${farm.name}: the farmer answered. ${line.label}.');
+        } else if (before == null) {
+          _alerts.insert(
+            0,
+            line.source == 'farmer'
+                ? '${farm.name}: the farmer reported a problem with their ${line.crop}.'
+                : '${farm.name}: ${line.flagged} flagged. The farmer has been asked to check.',
+          );
+        }
+      }
+      farm
+        ..live = true
+        ..line = line
+        ..phone = farmer.phone
+        ..channel = farmer.channel
+        ..crop = line == null ? farm.crop : _cap(line.crop);
+      farms.add(farm);
+    }
+    final waiting = {for (final callback in _callbacks) callback.id};
+    if (_syncedAt != null) {
+      for (final callback in snapshot.callbacks) {
+        if (!waiting.contains(callback.id)) {
+          _alerts.insert(0, '${callback.name} asked you to call them.');
+        }
+      }
+    }
+    _callbacks
+      ..clear()
+      ..addAll(snapshot.callbacks);
+    _farms
+      ..clear()
+      ..addAll(farms);
+    _syncedAt = DateTime.now();
+    _syncError = null;
+  }
+
+  Future<void> _signIn() async {
+    final code = await _askCode();
+    if (code == null || code.isEmpty) return;
+    try {
+      final name = await _api.signIn(code);
+      _message('Signed in as $name');
+      await _sync();
+    } on FieldwiseException catch (error) {
+      _message(error.message);
+    }
+  }
+
+  Future<void> _signOut() async {
+    await _api.signOut();
+    if (!mounted) return;
+    setState(() {
+      _farms
+        ..clear()
+        ..addAll(_sampleFarms());
+      _callbacks.clear();
+      _syncedAt = null;
+      _syncError = null;
+    });
+    _message('Signed out. Showing offline demo data.');
+    await _refreshData();
+  }
+
+  Future<String?> _askCode() async {
+    final controller = TextEditingController();
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Sign in to FieldWise'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          obscureText: true,
+          decoration: const InputDecoration(
+            hintText: 'Officer access code (fw_...)',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Sign in'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    return result;
+  }
+
+  Future<void> _call(String phone) async {
+    try {
+      await launchUrl(Uri(scheme: 'tel', path: phone));
+    } catch (_) {
+      _message('Call $phone');
+    }
+  }
+
+  Future<void> _closeCallback(FieldwiseCallback callback) async {
+    try {
+      await _api.closeCallback(callback.id);
+      setState(() {
+        _callbacks.removeWhere((item) => item.id == callback.id);
+        _events.insert(0, 'Called ${callback.name}');
+      });
+    } on FieldwiseException catch (error) {
+      _message(error.message);
+    }
+  }
+
+  /// A ready-made reply or Felix's own words, by SMS or WhatsApp.
+  Future<void> _compose(_Farm farm) async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+          children: [
+            Text(
+              'Message ${farm.name}',
+              style: Theme.of(ctx).textTheme.titleLarge,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              farm.channel == 'ussd'
+                  ? 'Goes by SMS to their keypad phone, in their language.'
+                  : 'Goes by WhatsApp, in their language.',
+            ),
+            const SizedBox(height: 8),
+            for (final advice in _advice)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(advice.label),
+                subtitle: Text(advice.english),
+                onTap: () => Navigator.pop(ctx, 'advice:${advice.id}'),
+              ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(LucideIcons.notebookPen),
+              title: const Text('Write my own'),
+              onTap: () => Navigator.pop(ctx, 'text'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (choice == null || !mounted) return;
+    String? text;
+    if (choice == 'text') {
+      text = await _askNote('Message to ${farm.name}');
+      if (text == null || text.isEmpty) return;
+    }
+    try {
+      await _api.sendMessage(
+        farm.id,
+        advice: choice.startsWith('advice:') ? choice.substring(7) : null,
+        text: text,
+      );
+      if (!mounted) return;
+      setState(() => _events.insert(0, '${farm.name}: Felix sent a message'));
+      _message('Sent to ${farm.name}');
+    } on FieldwiseException catch (error) {
+      _message(error.message);
+    }
+  }
+
+  Widget _callbackPanel() => _panel(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Call back', style: Theme.of(context).textTheme.titleMedium),
+        for (final callback in _callbacks)
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.call_outlined),
+            title: Text(callback.name),
+            subtitle: Text(
+              '${callback.phone} · asked ${_ago(callback.requestedAt)}',
+            ),
+            onTap: () => _call(callback.phone),
+            trailing: TextButton(
+              onPressed: () => _closeCallback(callback),
+              child: const Text('Done'),
+            ),
+          ),
+      ],
+    ),
+  );
+
+  Widget _serverPanel() => _panel(
+    child: ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(
+        _live ? Icons.cloud_done_outlined : Icons.cloud_off_outlined,
+      ),
+      title: Text(_live ? 'Live from FieldWise' : 'Offline demo data'),
+      subtitle: Text(
+        !_live
+            ? "Sign in with your officer access code to see farmers' answers."
+            : _syncError ??
+                  (_syncedAt == null
+                      ? 'Connecting…'
+                      : 'Signed in as ${_api.officerName ?? 'Felix'} · updated ${TimeOfDay.fromDateTime(_syncedAt!).format(context)}'),
+      ),
+      trailing: TextButton(
+        onPressed: _live ? _signOut : _signIn,
+        child: Text(_live ? 'Sign out' : 'Sign in'),
+      ),
+    ),
+  );
 
   List<_Farm> get _ranked =>
       [..._farms]..sort((a, b) => b.score.compareTo(a.score));
@@ -319,7 +702,9 @@ class _WorkspaceState extends State<_Workspace> {
   Future<void> _refreshData() async {
     // FieldWise's Kasungu snapshot is bundled for offline use. Fresh farm-level
     // forecasts and soil estimates replace it when the public APIs respond.
-    for (final farm in _farms) {
+    // Signed in, FieldWise does this on the server instead.
+    for (final farm in [..._farms]) {
+      if (_live) return;
       try {
         final response = await _dio.get<Map<String, dynamic>>(
           'https://api.open-meteo.com/v1/forecast',
@@ -447,11 +832,29 @@ class _WorkspaceState extends State<_Workspace> {
                   ),
                 if (farm.override != null)
                   _detailLine('Felix changed the plan', farm.override!),
+                if (farm.line?.answerLine != null)
+                  _detailLine("Farmer's answers", farm.line!.answerLine!),
+                if (farm.line?.notes.isNotEmpty ?? false)
+                  _detailLine('Notes', farm.line!.notes.join('\n')),
                 const SizedBox(height: 12),
                 Text(
                   'Evidence',
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
+                if (farm.live)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(LucideIcons.cloud),
+                    title: Text(
+                      (farm.line?.conditions.isNotEmpty ?? false)
+                          ? farm.line!.conditions
+                          : 'Not flagged by the forecast',
+                    ),
+                    subtitle: const Text(
+                      'FieldWise forecast check · Open-Meteo and SoilGrids',
+                    ),
+                  ),
+                if (!farm.live)
                 ListTile(
                   contentPadding: EdgeInsets.zero,
                   leading: const Icon(LucideIcons.cloud),
@@ -464,7 +867,7 @@ class _WorkspaceState extends State<_Workspace> {
                         : _forecastSource,
                   ),
                 ),
-                if (farm.soilLive)
+                if (!farm.live && farm.soilLive)
                   ListTile(
                     contentPadding: EdgeInsets.zero,
                     leading: const Icon(LucideIcons.layers),
@@ -505,14 +908,38 @@ class _WorkspaceState extends State<_Workspace> {
                   ],
                 ),
                 const SizedBox(height: 8),
-                TextButton.icon(
-                  onPressed: () {
-                    Navigator.pop(sheetContext);
-                    _openCheckIn(farm);
-                  },
-                  icon: const Icon(Icons.dialpad),
-                  label: const Text('Open farmer check-in'),
-                ),
+                if (farm.live)
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextButton.icon(
+                          onPressed: () {
+                            Navigator.pop(sheetContext);
+                            _compose(farm);
+                          },
+                          icon: const Icon(Icons.sms_outlined),
+                          label: const Text('Message farmer'),
+                        ),
+                      ),
+                      if (farm.phone != null)
+                        Expanded(
+                          child: TextButton.icon(
+                            onPressed: () => _call(farm.phone!),
+                            icon: const Icon(Icons.call_outlined),
+                            label: const Text('Call'),
+                          ),
+                        ),
+                    ],
+                  )
+                else
+                  TextButton.icon(
+                    onPressed: () {
+                      Navigator.pop(sheetContext);
+                      _openCheckIn(farm);
+                    },
+                    icon: const Icon(Icons.dialpad),
+                    label: const Text('Open farmer check-in'),
+                  ),
               ],
             ),
           ),
@@ -716,11 +1143,15 @@ class _WorkspaceState extends State<_Workspace> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Hello, Felix',
+                      'Hello, ${_api.officerName ?? 'Felix'}',
                       style: Theme.of(context).textTheme.headlineLarge,
                     ),
                     Text(
                       greetingDate(DateTime.now()),
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    Text(
+                      _live ? 'Live from FieldWise' : 'Offline demo data',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
                   ],
@@ -739,6 +1170,10 @@ class _WorkspaceState extends State<_Workspace> {
         ),
         const SizedBox(height: AlmanacDimens.sp5),
         _homeInset(_focusHero(ranked.first)),
+        if (_callbacks.isNotEmpty) ...[
+          const SizedBox(height: AlmanacDimens.sp5),
+          _homeInset(_callbackPanel()),
+        ],
         const SizedBox(height: AlmanacDimens.sp5),
         _homeInset(
           SectionHeader(
@@ -1583,17 +2018,23 @@ class _WorkspaceState extends State<_Workspace> {
         style: Theme.of(context).textTheme.bodyMedium,
       ),
       const SizedBox(height: 17),
-      _panel(
-        child: ListTile(
-          contentPadding: EdgeInsets.zero,
-          leading: const Icon(Icons.dialpad),
-          title: const Text('Farmer check-in'),
-          subtitle: const Text('Open a check-in for a farm'),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => _chooseCheckInFarm(),
-        ),
-      ),
+      _serverPanel(),
       const SizedBox(height: 17),
+      // Signed in, farmers answer on their own phones (USSD or WhatsApp);
+      // the in-app check-in is for the offline demo.
+      if (!_live) ...[
+        _panel(
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.dialpad),
+            title: const Text('Farmer check-in'),
+            subtitle: const Text('Open a check-in for a farm'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => _chooseCheckInFarm(),
+          ),
+        ),
+        const SizedBox(height: 17),
+      ],
       for (final farm in _ranked.where((item) => item.report != null)) ...[
         _panel(
           child: ListTile(
